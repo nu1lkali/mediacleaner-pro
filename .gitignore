@@ -1,0 +1,28 @@
+# 依赖与构建产物
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+bin/
+*.exe
+
+# 运行时数据（源码与数据分离，数据目录在 /volume1/docker/mediacleaner-data）
+data/
+config/
+cache/
+*.db
+*.db-shm
+*.db-wal
+
+# 本地部署状态与密钥，绝不入库
+.env
+.env.local
+docker-compose.override.yml
+deploy/*.local
+
+# 工具与系统
+.workbuddy/
+syn-check.cjs
+.DS_Store
+Thumbs.db
+*.log
+__pycache__/

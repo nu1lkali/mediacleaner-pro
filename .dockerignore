@@ -1,0 +1,45 @@
+# 构建上下文排除项 —— 只把源码送进构建，
+# 顺手把早期 Python 原型、本地工具链、测试产物挡在外面。
+.git
+.gitignore
+
+# 前端
+frontend/node_modules
+frontend/dist
+frontend/.vite
+frontend/*.log
+
+# 后端：Go 源码保留，Python 原型与测试产物排除
+backend/bin
+backend/app
+backend/tests
+backend/.pytest_cache
+backend/requirements.txt
+backend/cache
+backend/data
+backend/database
+backend/config
+backend/*.log
+
+# 本地开发工具与数据
+.tools
+testdata
+tools
+.tools/
+*.db
+*.db-wal
+*.db-shm
+
+# 运行时数据：源码与数据分离后，数据目录在 /volume1/docker/mediacleaner-data，
+# 若曾在本项目目录里跑过，这里的残留也一律不进构建上下文
+/data
+/config
+/cache
+data/
+config/
+cache/
+
+# 部署时的本地状态
+.env
+docker-compose.override.yml
+deploy/*.local

@@ -1,0 +1,83 @@
+# MediaCleaner Pro —— 群晖 Docker Compose 部署
+#
+# 目录约定（源码与数据彻底分开）：
+#   源码：   /volume1/docker/mediacleaner          （本目录，只读使用）
+#   数据：   /volume1/docker/mediacleaner-data     （容器内 /data /config /cache）
+#
+# 快速开始：
+#   bash deploy/synology-deploy.sh            # 一键构建 + 启动
+#
+# 媒体目录通过 deploy/synology-deploy.sh 生成的 docker-compose.override.yml 挂载，
+# 也可以直接在本文件里手动添加（示例见文件末尾注释）。
+
+services:
+  mediacleaner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-https://goproxy.cn,https://proxy.golang.org,direct}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
+        APP_VERSION: ${MC_VERSION:-1.1.0}
+        # 基础镜像可换源（默认与 deploy 脚本预拉取的标准标签一致）。
+        # 例：MC_NODE_IMAGE=docker.1ms.run/library/node:20-alpine
+        NODE_IMAGE: ${MC_NODE_IMAGE:-node:20-alpine}
+        GO_IMAGE: ${MC_GO_IMAGE:-golang:1.23-alpine}
+        RUNTIME_IMAGE: ${MC_RUNTIME_IMAGE:-alpine:3.20}
+    image: mediacleaner:local
+    container_name: mediacleaner
+    restart: unless-stopped
+
+    ports:
+      - "${MC_PORT:-8083}:8080"
+
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      # 群晖上文件属主通常不是 1000，按实际情况在 .env 里改
+      PUID: ${PUID:-1026}
+      PGID: ${PGID:-100}
+      # 首次启动用于创建 admin；留空则随机生成并写入 /config/initial-admin.txt
+      MC_ADMIN_PASSWORD: ${MC_ADMIN_PASSWORD:-}
+      # 首次启动自动注册的存储卷（分号分隔，形如 photo=/media/photo）
+      MC_ROOTS: ${MC_ROOTS:-}
+      # 允许注册的额外根目录（媒体挂载点在 /media 下，必须在白名单里）
+      MC_ALLOW_PATHS: ${MC_ALLOW_PATHS:-/media}
+      MC_THREADS: ${MC_THREADS:-4}
+      MC_QUARANTINE_DAYS: ${MC_QUARANTINE_DAYS:-30}
+      MC_SESSION_HOURS: ${MC_SESSION_HOURS:-168}
+      # 1 = 重算指纹时连 ctime 一起比（防"改内容又改回 mtime"，但 chmod 也会触发重算）
+      MC_CTIME_CHECK: ${MC_CTIME_CHECK:-0}
+      # 仅用于启动失败时打印提示（容器内不需要用它做任何事）
+      MC_HOST_DATA_DIR: ${MC_DATA_DIR:-/volume1/docker/mediacleaner-data}
+
+    volumes:
+      # 程序数据（源码之外）：SQLite 库、索引、配置、隔离区、缩略图缓存
+      - "${MC_DATA_DIR:-/volume1/docker/mediacleaner-data}/data:/data"
+      - "${MC_DATA_DIR:-/volume1/docker/mediacleaner-data}/config:/config"
+      - "${MC_DATA_DIR:-/volume1/docker/mediacleaner-data}/cache:/cache"
+      # 媒体目录：由 override 文件追加。默认读写（否则隔离区无法搬移文件），
+      # 但程序内的「允许清理」开关默认关闭；要物理级只读加 --readonly。
+      # - /volume1/photo:/media/photo
+      # - /volume1/video:/media/video:ro
+
+    security_opt:
+      - no-new-privileges:true
+
+    # NAS 上内存通常有限，给个上限防止扫描高峰把整机拖死
+    mem_limit: ${MC_MEM_LIMIT:-2g}
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+# 说明：视频相似度需要 ffmpeg —— 已内置在镜像里（Alpine 官方源），
+# 无需在群晖上另行安装第三方套件。

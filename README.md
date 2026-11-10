@@ -23,10 +23,10 @@ NAS 媒体库去重与清理工具。帮你找出群晖（DSM 6/7）上重复、
 ## 🖼 界面一览
 
 ### 总览看板
-![总览看板](docs/screenshots/dashboard-overview.svg)
+![总览看板](docs/screenshots/dashboard-overview.png)
 
 ### 隔离区 · 按类型筛选
-![隔离区类型筛选](docs/screenshots/quarantine-type-filter.svg)
+![隔离区类型筛选](docs/screenshots/quarantine-type-filter.png)
 
 ### 预览弹窗 · 点空白处关闭
 ![预览弹窗](docs/screenshots/preview-modal.png)

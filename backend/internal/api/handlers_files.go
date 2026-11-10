@@ -15,23 +15,23 @@ import (
 
 // FileDetail 是单个文件的完整信息。
 type FileDetail struct {
-	ID         int64  `json:"id"`
-	RootID     int64  `json:"root_id"`
-	Path       string `json:"path"`
-	DirPath    string `json:"dir_path"`
-	Name       string `json:"name"`
-	Stem       string `json:"stem"`
-	Ext        string `json:"ext"`
-	Size       int64  `json:"size"`
-	MtimeNS    int64  `json:"mtime_ns"`
-	Kind       string `json:"media_kind"`
-	State      string `json:"state"`
-	HashStatus string `json:"hash_status"`
-	QuickHash  string `json:"quick_hash"`
+	ID          int64  `json:"id"`
+	RootID      int64  `json:"root_id"`
+	Path        string `json:"path"`
+	DirPath     string `json:"dir_path"`
+	Name        string `json:"name"`
+	Stem        string `json:"stem"`
+	Ext         string `json:"ext"`
+	Size        int64  `json:"size"`
+	MtimeNS     int64  `json:"mtime_ns"`
+	Kind        string `json:"media_kind"`
+	State       string `json:"state"`
+	HashStatus  string `json:"hash_status"`
+	QuickHash   string `json:"quick_hash"`
 	ContentHash string `json:"content_hash"`
-	PHash      string `json:"phash"`
-	Volume     string `json:"volume"`
-	RootName   string `json:"root_name"`
+	PHash       string `json:"phash"`
+	Volume      string `json:"volume"`
+	RootName    string `json:"root_name"`
 
 	Media     *media.Info `json:"media"`
 	ExtraJSON string      `json:"extra_json"`
@@ -46,11 +46,11 @@ type FileDetail struct {
 
 // GroupRef 指向该文件所属的重复组。
 type GroupRef struct {
-	GroupID   int64   `json:"group_id"`
-	Kind      string  `json:"kind"`
-	Members   int     `json:"members"`
+	GroupID    int64   `json:"group_id"`
+	Kind       string  `json:"kind"`
+	Members    int     `json:"members"`
 	Similarity float64 `json:"similarity"`
-	IsKeeper  bool    `json:"is_keeper"`
+	IsKeeper   bool    `json:"is_keeper"`
 }
 
 func (s *Server) loadFile(r *http.Request, id int64) (*FileDetail, error) {
@@ -80,10 +80,10 @@ func (s *Server) loadFile(r *http.Request, id int64) (*FileDetail, error) {
 
 	// 媒体信息（可能不存在）
 	var (
-		dur, bitrate int64
-		w, h         int
+		dur, bitrate                                   int64
+		w, h                                           int
 		vcodec, acodec, container, source, extra, exif sql.NullString
-		fps sql.NullFloat64
+		fps                                            sql.NullFloat64
 	)
 	err = s.st.Get(r.Context(), []any{&dur, &w, &h, &vcodec, &acodec, &bitrate, &fps,
 		&container, &source, &extra, &exif},
@@ -118,7 +118,7 @@ func (s *Server) loadFile(r *http.Request, id int64) (*FileDetail, error) {
 	rows, err := s.st.Select(r.Context(), `
 		SELECT m.group_id, g.kind, g.member_count, m.similarity, m.is_keeper
 		FROM dup_group_members m JOIN dup_groups g ON g.id=m.group_id
-		WHERE m.file_id=? ORDER BY g.kind`, id)
+		WHERE m.file_id=? AND g.batch_active=1 ORDER BY g.kind`, id)
 	if err == nil {
 		for rows.Next() {
 			var g GroupRef
@@ -225,7 +225,13 @@ func (s *Server) handleThumb(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, thumb)
 }
 
-// handleProxy 为浏览器不兼容的格式生成 H.264/AAC 代理文件再播放。
+// handleProxy 处理视频预览：
+//   - ?probe=1：只返回 JSON 状态，不阻塞（前端据此决定是否等待转码）
+//   - 默认：返回可直接播放的字节流（原文件，或已生成的转码缓存）
+//
+// 浏览器不兼容的格式交给后台 goroutine 异步转码，绝不让 HTTP 请求挂死。
+// 旧实现会在请求里同步跑完整片 x264，并在 running 时返回 202 JSON，
+// 浏览器把 202 当视频字节流且 2xx 不触发 error，表现就是「一直转圈」。
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	id, err := pathInt64(r, "id")
 	if err != nil {
@@ -241,38 +247,41 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		fail(w, badRequest("仅视频支持代理播放"))
 		return
 	}
-	if !media.NeedsProxy(f.Ext, codecOf(f, "video"), codecOf(f, "audio")) {
-		// 本来就兼容，直接给原文件
+	var dur int64
+	if f.Media != nil {
+		dur = f.Media.DurationMS
+	}
+	needs := media.NeedsProxy(f.Ext, codecOf(f, "video"), codecOf(f, "audio"))
+
+	if r.URL.Query().Get("probe") != "" {
+		var st media.ProxyState
+		if !needs {
+			st = media.ProxyState{Status: "ready", Percent: 100, Direct: true,
+				Message: "浏览器可直接播放原文件"}
+		} else {
+			st = media.EnsureProxyAsync(s.cfg, f.ID, path, f.MtimeNS, dur)
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		ok(w, st)
+		return
+	}
+
+	if !needs {
 		if err := media.ServeFile(w, r, path, f.Name, media.ContentType(f.Ext)); err != nil {
 			return
 		}
 		return
 	}
-	if !media.FFmpegAvailable() {
-		fail(w, &apiError{Status: http.StatusNotImplemented, Code: "ffmpeg_missing",
-			Msg: "该格式需要 ffmpeg 转码，但当前环境未检测到 ffmpeg"})
+	dest := media.ProxyPathFor(s.cfg, f.ID, f.MtimeNS)
+	if st, err := os.Stat(dest); err == nil && st.Size() > 0 {
+		if err := media.ServeFile(w, r, dest, f.Stem+".mp4", "video/mp4"); err != nil {
+			return
+		}
 		return
 	}
-	var dur int64
-	if f.Media != nil {
-		dur = f.Media.DurationMS
-	}
-	st := media.ProxyStatus(f.ID)
-	if st.Status == "running" {
-		writeJSON(w, http.StatusAccepted, map[string]any{
-			"status": "converting", "progress": st.Percent,
-			"message": "正在转码，请稍候",
-		})
-		return
-	}
-	proxy, err := media.BuildProxy(s.cfg, f.ID, path, f.MtimeNS, dur)
-	if err != nil {
-		fail(w, serverError("转码失败: "+err.Error()))
-		return
-	}
-	if err := media.ServeFile(w, r, proxy, f.Stem+".mp4", "video/mp4"); err != nil {
-		return
-	}
+	st := media.EnsureProxyAsync(s.cfg, f.ID, path, f.MtimeNS, dur)
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusAccepted, st)
 }
 
 func codecOf(f *FileDetail, kind string) string {

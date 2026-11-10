@@ -49,9 +49,15 @@ services:
       MC_CTIME_CHECK: ${MC_CTIME_CHECK:-0}
       # 仅用于启动失败时打印提示（容器内不需要用它做任何事）
       MC_HOST_DATA_DIR: ${MC_DATA_DIR:-/volume1/docker/mediacleaner-data}
+      # /cache 在本文件下面被单独挂载，隔离区就在它有下面。程序用这个宿主机路径
+      # 拼出「/host 视角」的同一个目录，把隔离从"整文件复制"变成 rename（O(1)）。
+      # 只影响搬移方式，不影响隔离区实际存哪里：一律在 ${MC_DATA_DIR}/cache 里。
+      MC_HOST_CACHE_DIR: ${MC_DATA_DIR:-/volume1/docker/mediacleaner-data}/cache
 
     volumes:
       # 程序数据（源码之外）：SQLite 库、索引、配置、隔离区、缩略图缓存
+      # 全部落在宿主机 ${MC_DATA_DIR}，容器重建/升级不会丢隔离区
+      # （隔离区实体文件在 cache/quarantine 下，不在容器的可写层里）
       - "${MC_DATA_DIR:-/volume1/docker/mediacleaner-data}/data:/data"
       - "${MC_DATA_DIR:-/volume1/docker/mediacleaner-data}/config:/config"
       - "${MC_DATA_DIR:-/volume1/docker/mediacleaner-data}/cache:/cache"

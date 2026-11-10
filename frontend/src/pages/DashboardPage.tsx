@@ -130,7 +130,7 @@ export default function DashboardPage() {
             <CardBody className="space-y-3.5">
               <ReclaimRow
                 label="完全重复"
-                desc="内容逐字节一致（全文 SHA-256 校验）"
+                desc="内容相同的副本（全文 BLAKE3 或清理前逐字节复验）"
                 bytes={dup.exact_bytes}
                 files={dup.exact_files}
                 groups={dup.exact_groups}

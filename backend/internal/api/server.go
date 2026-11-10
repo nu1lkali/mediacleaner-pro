@@ -92,6 +92,12 @@ func (s *Server) routes() {
 	// 重复组
 	m.HandleFunc("GET /api/groups", s.requireAuth(s.handleListGroups))
 	m.HandleFunc("GET /api/groups/summary", s.requireAuth(s.handleGroupSummary))
+	m.HandleFunc("GET /api/groups/keeper-rule", s.requireAuth(s.handleGetKeeperRule))
+	m.HandleFunc("POST /api/groups/keeper-rule", s.requireAuth(s.handleApplyKeeperRule))
+	// 批次隔离：每次扫描各留一份结果，可切换查看 / 一键信任未校验分组
+	m.HandleFunc("GET /api/groups/batches", s.requireAuth(s.handleListBatches))
+	m.HandleFunc("POST /api/groups/batch", s.requireAuth(s.handleSwitchBatch))
+	m.HandleFunc("POST /api/groups/trust-all", s.requireAuth(s.handleTrustAllGroups))
 	m.HandleFunc("GET /api/groups/{id}", s.requireAuth(s.handleGetGroup))
 	m.HandleFunc("POST /api/groups/{id}/keeper", s.requireAuth(s.handleSetKeeper))
 
@@ -116,13 +122,19 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/clean/tasks/{id}", s.requireAuth(s.handleGetCleanTask))
 	m.HandleFunc("GET /api/clean/tasks/{id}/items", s.requireAuth(s.handleCleanItems))
 	m.HandleFunc("POST /api/clean/tasks/{id}/execute", s.requireAuth(s.handleExecuteClean))
+	m.HandleFunc("POST /api/clean/tasks/{id}/pause", s.requireAuth(s.handlePauseClean))
+	m.HandleFunc("POST /api/clean/tasks/{id}/resume", s.requireAuth(s.handleResumeClean))
 	m.HandleFunc("POST /api/clean/tasks/{id}/cancel", s.requireAuth(s.handleCancelClean))
 	m.HandleFunc("DELETE /api/clean/tasks/{id}", s.requireAuth(s.handleDeleteCleanTask))
 	m.HandleFunc("PATCH /api/clean/items/{id}", s.requireAuth(s.handleSelectItem))
 
 	// 隔离区
 	m.HandleFunc("GET /api/quarantine", s.requireAuth(s.handleListQuarantine))
+	m.HandleFunc("GET /api/quarantine/origin", s.requireAuth(s.handleQuarantineOrigin))
 	m.HandleFunc("GET /api/quarantine/{id}", s.requireAuth(s.handleGetQuarantine))
+	m.HandleFunc("GET /api/quarantine/{id}/origin", s.requireAuth(s.handleQuarantineOrigin))
+	m.HandleFunc("GET /api/quarantine/{id}/file", s.requireAuth(s.handleQuarantineFile))
+	m.HandleFunc("GET /api/quarantine/{id}/thumb", s.requireAuth(s.handleQuarantineThumb))
 	m.HandleFunc("POST /api/quarantine/{id}/restore", s.requireAuth(s.handleRestore))
 	m.HandleFunc("DELETE /api/quarantine/{id}", s.requireAuth(s.handlePurgeQuarantine))
 	m.HandleFunc("POST /api/quarantine/purge-expired", s.requireAdmin(s.handlePurgeExpired))
@@ -170,7 +182,7 @@ func (s *Server) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
 	var bytes int64
 	_ = s.st.Get(r.Context(), []any{&files, &bytes},
 		`SELECT COUNT(*), COALESCE(SUM(size),0) FROM files WHERE state='active'`)
-	_ = s.st.Get(r.Context(), &groups, `SELECT COUNT(*) FROM dup_groups`)
+	_ = s.st.Get(r.Context(), &groups, `SELECT COUNT(*) FROM dup_groups WHERE batch_active=1`)
 
 	qCount, qBytes, _ := s.quar.Stats(r.Context())
 	ok(w, map[string]any{

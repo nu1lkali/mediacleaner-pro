@@ -75,21 +75,24 @@ const (
 func Profiles() []map[string]any {
 	return []map[string]any{
 		{
-			"id": ProfileFast, "name": "极速：仅完全重复",
-			"desc": "只做元数据索引 + 采样指纹 + 全文校验，不调用 ffmpeg、不解码媒体。适合同名同内容文件、重复视频的快速排查。",
+			"id": ProfileFast, "name": "极速：仅完全重复（采样判定）",
+			"desc": "只做元数据索引 + 采样指纹，不读全文、不调用 ffmpeg。分组标记为「未校验」，清理前会自动与保留副本逐字节比对，不一致就拒绝删除；若连这一步也要跳过，可在高级选项勾选「完全免校验」。适合先快速看一遍库里有多少重复。",
 			"detect_exact": true, "detect_image": false, "detect_video": false,
+			"defer_verify": true, "skip_verify": false,
 			"need_ffmpeg": false,
 		},
 		{
 			"id": ProfileStandard, "name": "标准：完全重复 + 相似图片",
-			"desc": "在极速基础上增加图片 pHash 聚类（纯 Go 实现），可发现同图不同压缩/不同尺寸。",
+			"desc": "在极速基础上增加图片 pHash 聚类（纯 Go 实现），可发现同图不同压缩/不同尺寸；同时恢复扫描时全文校验。",
 			"detect_exact": true, "detect_image": true, "detect_video": false,
+			"defer_verify": false, "skip_verify": false,
 			"need_ffmpeg": false,
 		},
 		{
 			"id": ProfileFull, "name": "深度：含相似视频",
 			"desc": "再增加视频关键帧感知哈希，可发现转码/换封装/改码率的同一视频。需要 ffmpeg，耗时与视频数量线性相关。",
 			"detect_exact": true, "detect_image": true, "detect_video": true,
+			"defer_verify": false, "skip_verify": false,
 			"need_ffmpeg": true,
 		},
 	}
@@ -105,6 +108,17 @@ type Options struct {
 	DetectExact        bool `json:"detect_exact"`
 	DetectSimilarImage bool `json:"detect_similar_image"`
 	DetectSimilarVideo bool `json:"detect_similar_video"`
+
+	// DeferVerify 为 true 时，扫描阶段不做全文 BLAKE3，只用 (size, quick_hash)
+	// 建组并把分组标记为 evidence=sampled；真正的逐字节比对推迟到清理执行前
+	// （与保留副本比对，不一致则拒绝删除）。扫描从"读全库"降到"读 256KB/文件"。
+	DeferVerify bool `json:"defer_verify"`
+
+	// SkipVerify 是更激进的一档：扫描不读全文，且清理时也不与保留副本比对。
+	// 本批分组标记为 evidence=trusted，可不经校验直接进入批量清理。
+	// 风险：只比过大小 + 4 段采样，同大小不同内容的文件会被当成副本删除。
+	// 必须由用户在界面上显式勾选并二次确认，选择会持久化在 options_json 与审计日志。
+	SkipVerify bool `json:"skip_verify"`
 
 	OnlyKinds      []string `json:"only_kinds"`
 	MinFileSize    int64    `json:"min_file_size"`
@@ -151,6 +165,11 @@ func (o *Options) normalize(cfg *config.Config) {
 		o.Mode = "incremental"
 	}
 	o.ApplyProfile(false)
+	// 免校验必然不读全文；从旧 options_json 恢复的任务也按这个口径统一，
+	// 避免出现「skip_verify=true 但 defer_verify=false」这种自相矛盾的组合。
+	if o.SkipVerify {
+		o.DeferVerify = true
+	}
 	if o.Threads <= 0 {
 		o.Threads = cfg.Threads
 	}
@@ -444,7 +463,14 @@ func (e *Engine) run(parent context.Context, taskID int64) {
 	default:
 		p.Status = StatusSuccess
 		p.Phase = PhaseDone
-		p.Message = fmt.Sprintf("完成：索引 %d 个文件，共 %s", p.FilesIndexed, FormatSize(p.BytesScanned))
+		suffix := ""
+		switch {
+		case opts.SkipVerify && opts.DetectExact:
+			suffix = "；本批分组为「免校验」，清理时不会与保留副本比对，存在同大小不同内容被误删的风险"
+		case opts.DeferVerify && opts.DetectExact:
+			suffix = "；分组未全文校验，清理前会自动比对保留副本"
+		}
+		p.Message = fmt.Sprintf("完成：索引 %d 个文件，共 %s%s", p.FilesIndexed, FormatSize(p.BytesScanned), suffix)
 	}
 	e.persist(rs, p)
 	_, _ = e.st.Exec(context.Background(), `UPDATE scan_tasks SET finished_at=? WHERE id=?`, store.NowMS(), taskID)
@@ -495,9 +521,11 @@ func (e *Engine) pipeline(ctx context.Context, rs *runState, taskName string, op
 		if err := e.phaseQuick(ctx, rs, opts); err != nil {
 			return err
 		}
-		// 阶段 4：精确校验
-		if err := e.phaseExact(ctx, rs, opts); err != nil {
-			return err
+		// 阶段 4：精确校验。延迟校验模式跳过全文读取，改到清理执行前比对。
+		if !opts.DeferVerify {
+			if err := e.phaseExact(ctx, rs, opts); err != nil {
+				return err
+			}
 		}
 	}
 	// 阶段 5：相似度（图片 / 视频各自独立）
@@ -632,14 +660,18 @@ func (e *Engine) phaseQuick(ctx context.Context, rs *runState, opts Options) err
 		}
 	}
 	e.setPhase(rs, PhaseQuick, int64(len(need)))
+	rs.update(func(p *Progress) {
+		p.Message = fmt.Sprintf("快速指纹：%d / %d 个候选待采样", len(need), len(cands))
+	})
 
-	total := int64(len(cands))
-	hw := newHashWriter(e.st, rs, total)
+	// 分母用本次真正要处理的文件数，否则进度会因为含已跳过的文件而偏小/倒退
+	hw := newHashWriter(e.st, rs, int64(len(need)))
 	err = parallelFor(ctx, opts.Threads, len(need), func(i int) error {
 		if err := rs.wait(); err != nil {
 			return err
 		}
 		f := need[i]
+		rs.update(func(p *Progress) { p.CurrentPath = f.Path })
 		h, err := fingerprint.Quick(f.Path, f.Size, e.cfg.QuickBlock, e.cfg.QuickSmall)
 		if err != nil {
 			hw.recordError(ctx, f.Path, "quick", err)
@@ -653,13 +685,19 @@ func (e *Engine) phaseQuick(ctx context.Context, rs *runState, opts Options) err
 	return hw.flush(ctx)
 }
 
-// phaseExact 先比首尾窗口，再全文 BLAKE3，得到可信的 content_hash。
+// phaseExact 全文 BLAKE3，得到可信的 content_hash。
+//
+// 为什么这里不能靠"头尾不同"省读取：入桶条件是 phaseQuick 的采样指纹相同，
+// 而采样窗口本来就覆盖了文件首 64KB 与末 64KB（fingerprint.Quick 的 offsets
+// 为 0 / size*1/3 / size*2/3 / size-block）。因此凡是进入本阶段的文件，首尾
+// 窗口必然也相同——再比一遍首尾不会排除任何候选，只会多读 128KB。
+// 要减少读取量，唯一严谨的杠杆是把校验从"扫描时"推迟到"删除前"，见 README 4.2。
 func (e *Engine) phaseExact(ctx context.Context, rs *runState, opts Options) error {
 	cands, err := QueryCandidates(ctx, e.st, opts.MinFileSize, firstRoot(opts.RootIDs))
 	if err != nil {
 		return err
 	}
-	// 按 (size, quick_hash) 分桶，只有桶内 ≥2 才值得计算
+	// 按 (size, quick_hash) 分桶，只有桶内 >=2 才值得算
 	buckets := map[string][]FileRef{}
 	key := func(f FileRef) string {
 		return fmt.Sprintf("%d|%s", f.Size, f.QuickHash)
@@ -682,18 +720,30 @@ func (e *Engine) phaseExact(ctx context.Context, rs *runState, opts Options) err
 		}
 	}
 	sort.Slice(todo, func(i, j int) bool { return todo[i].Size > todo[j].Size })
-	e.setPhase(rs, PhaseExact, int64(len(todo)))
 
-	hw := newHashWriter(e.st, rs, int64(len(cands)))
+	// 把"要读多少字节"写进 message：这一阶段纯磁盘 I/O，
+	// 看到总量就能判断是慢还是真卡住。
+	var exactBytes int64
+	for _, f := range todo {
+		exactBytes += f.Size
+	}
+	e.setPhase(rs, PhaseExact, int64(len(todo)))
+	rs.update(func(p *Progress) {
+		if len(todo) == 0 {
+			p.Message = "精确校验：没有需要全文比对的候选"
+			return
+		}
+		p.Message = fmt.Sprintf("精确校验：%d 个候选文件需全文读取，共 %s（只算哈希，不解码）",
+			len(todo), FormatSize(exactBytes))
+	})
+
+	hw := newHashWriter(e.st, rs, int64(len(todo)))
 	err = parallelFor(ctx, opts.Threads, len(todo), func(i int) error {
 		if err := rs.wait(); err != nil {
 			return err
 		}
 		f := todo[i]
-		if _, err := fingerprint.HeadTail(f.Path, f.Size, e.cfg.ExactHeadTail); err != nil {
-			hw.recordError(ctx, f.Path, "headtail", err)
-			return nil
-		}
+		rs.update(func(p *Progress) { p.CurrentPath = f.Path })
 		abort := func() bool { return rs.ctx.Err() == nil }
 		sum, err := fingerprint.Full(f.Path, e.cfg.ExactChunk, abort, nil)
 		if err != nil {
@@ -931,7 +981,7 @@ func (e *Engine) phaseVideoFrames(ctx context.Context, rs *runState, opts Option
 func (e *Engine) phaseGroup(ctx context.Context, rs *runState, opts Options) error {
 	kinds := opts.EnabledKinds()
 	e.setPhase(rs, PhaseGroup, int64(len(kinds)+1))
-	return e.buildGroups(ctx, rs, kinds)
+	return e.buildGroups(ctx, rs, kinds, opts)
 }
 
 // ---------- 工具 ----------
@@ -1040,12 +1090,12 @@ func (w *hashWriter) begin(ctx context.Context) error {
 
 func (w *hashWriter) step(ctx context.Context) error {
 	w.done++
-	if w.done%50 == 0 {
-		w.rs.update(func(p *Progress) {
-			p.PhaseDone = w.done
-			p.PhaseTotal = w.tot
-		})
-	}
+	// 每个文件都推进一次进度。这里只动内存，落库由 900ms 的 persist 循环负责，
+	// 因此开销可以忽略；若按 %50 批量刷新，todo 少于 50 时进度条会整段不动。
+	w.rs.update(func(p *Progress) {
+		p.PhaseDone = w.done
+		p.PhaseTotal = w.tot
+	})
 	return nil
 }
 

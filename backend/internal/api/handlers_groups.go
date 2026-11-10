@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"mediacleaner/internal/keeper"
+	"mediacleaner/internal/store"
 )
 
 // GroupMember 是组内成员的展示视图。
@@ -15,6 +18,9 @@ type GroupMember struct {
 	Size       int64   `json:"size"`
 	Kind       string  `json:"media_kind"`
 	MtimeNS    int64   `json:"mtime_ns"`
+	// CtimeNS 是 inode 变更时间（Linux 上不是创建时间）；BtimeNS 才是真实创建时间，0=未知。
+	CtimeNS    int64   `json:"ctime_ns"`
+	BtimeNS    int64   `json:"btime_ns"`
 	Similarity float64 `json:"similarity"`
 	IsKeeper   bool    `json:"is_keeper"`
 	KeepReason string  `json:"keep_reason"`
@@ -40,6 +46,11 @@ type Group struct {
 	TotalBytes       int64         `json:"total_bytes"`
 	ReclaimableBytes int64         `json:"reclaimable_bytes"`
 	AvgSimilarity    float64       `json:"avg_similarity"`
+	// Evidence 是分组证据等级：exact=已逐字节校验；sampled=仅采样一致，
+	// 清理执行前会自动与保留副本比对；similar=感知哈希相似。
+	Evidence         string        `json:"evidence"`
+	// KeeperRule 是该组的「同组保留条件」；空串=未配置，保持原有行为。
+	KeeperRule       string        `json:"keeper_rule"`
 	CreatedAt        int64         `json:"created_at"`
 	Members          []GroupMember `json:"members"`
 }
@@ -64,7 +75,8 @@ func (s *Server) handleListGroups(w http.ResponseWriter, r *http.Request) {
 		sortBy = "reclaim"
 	}
 
-	where := []string{"g.kind=?", "g.member_count>1"}
+	// 只看当前激活批次的分组；历史批次由 /api/groups/batch 切换后再查
+	where := []string{"g.kind=?", "g.member_count>1", "g.batch_active=1"}
 	args := []any{kind}
 	if minReclaim > 0 {
 		where = append(where, "g.reclaimable_bytes>=?")
@@ -98,7 +110,8 @@ func (s *Server) handleListGroups(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.st.Select(r.Context(), fmt.Sprintf(`
 		SELECT g.id, g.kind, g.signature, g.size, g.member_count, g.total_bytes,
-		       g.reclaimable_bytes, g.avg_similarity, g.created_at
+		       g.reclaimable_bytes, g.avg_similarity, g.evidence,
+		       COALESCE(g.keeper_rule,''), g.created_at
 		FROM dup_groups g WHERE %s ORDER BY %s LIMIT ? OFFSET ?`, whereSQL, order),
 		append(args, size, (page-1)*size)...)
 	if err != nil {
@@ -111,7 +124,8 @@ func (s *Server) handleListGroups(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var g Group
 		if err := rows.Scan(&g.ID, &g.Kind, &g.Signature, &g.Size, &g.MemberCount,
-			&g.TotalBytes, &g.ReclaimableBytes, &g.AvgSimilarity, &g.CreatedAt); err != nil {
+			&g.TotalBytes, &g.ReclaimableBytes, &g.AvgSimilarity, &g.Evidence,
+			&g.KeeperRule, &g.CreatedAt); err != nil {
 			rows.Close()
 			fail(w, err)
 			return
@@ -146,11 +160,13 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	var g Group
 	err = s.st.Get(r.Context(), []any{&g.ID, &g.Kind, &g.Signature, &g.Size, &g.MemberCount,
-		&g.TotalBytes, &g.ReclaimableBytes, &g.AvgSimilarity, &g.CreatedAt},
+		&g.TotalBytes, &g.ReclaimableBytes, &g.AvgSimilarity, &g.Evidence,
+		&g.KeeperRule, &g.CreatedAt},
 		`SELECT id, kind, signature, size, member_count, total_bytes, reclaimable_bytes,
-		        avg_similarity, created_at FROM dup_groups WHERE id=?`, id)
+		        avg_similarity, evidence, COALESCE(keeper_rule,''), created_at
+		 FROM dup_groups WHERE id=? AND batch_active=1`, id)
 	if err != nil {
-		fail(w, notFound("分组不存在"))
+		fail(w, notFound("分组不存在或不属于当前批次"))
 		return
 	}
 	index := map[int64]*Group{g.ID: &g}
@@ -165,7 +181,7 @@ func (s *Server) handleGroupSummary(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.st.Select(r.Context(), `
 		SELECT kind, COUNT(*) AS groups, COALESCE(SUM(member_count - 1),0) AS removable,
 		       COALESCE(SUM(reclaimable_bytes),0) AS bytes
-		FROM dup_groups WHERE member_count>1 GROUP BY kind`)
+		FROM dup_groups WHERE member_count>1 AND batch_active=1 GROUP BY kind`)
 	if err != nil {
 		fail(w, err)
 		return
@@ -212,6 +228,7 @@ func (s *Server) fillMembers(r *http.Request, index map[int64]*Group, limit int)
 	}
 	rows, err := s.st.Select(r.Context(), `
 		SELECT m.group_id, f.id, f.path, f.name, f.ext, f.size, f.media_kind, f.mtime_ns,
+		       COALESCE(f.ctime_ns,0), COALESCE(f.btime_ns,0),
 		       m.similarity, m.is_keeper, COALESCE(m.keep_reason,''), COALESCE(rt.volume,''),
 		       f.root_id, COALESCE(md.width,0), COALESCE(md.height,0), COALESCE(md.duration_ms,0),
 		       COALESCE(md.bitrate,0), COALESCE(md.video_codec,''), COALESCE(md.audio_codec,''),
@@ -233,7 +250,8 @@ func (s *Server) fillMembers(r *http.Request, index map[int64]*Group, limit int)
 			keep  int
 		)
 		if err := rows.Scan(&gid, &m.FileID, &m.Path, &m.Name, &m.Ext, &m.Size, &m.Kind,
-			&m.MtimeNS, &m.Similarity, &keep, &m.KeepReason, &m.Volume, &m.RootID,
+			&m.MtimeNS, &m.CtimeNS, &m.BtimeNS,
+			&m.Similarity, &keep, &m.KeepReason, &m.Volume, &m.RootID,
 			&m.Width, &m.Height, &m.DurationMS, &m.Bitrate, &m.VideoCodec, &m.AudioCodec,
 			&m.HashStatus, &m.State); err != nil {
 			return err
@@ -254,6 +272,8 @@ type setKeeperReq struct {
 }
 
 // handleSetKeeper 允许用户手动指定保留文件 —— 手动优先于任何自动策略。
+// 因此手动指定会同时清除该组的 keeper_rule：否则执行清理前的条件复核会再次
+// 覆盖用户的选择，界面上就会出现「点了保留却又变回去」的困惑。
 func (s *Server) handleSetKeeper(w http.ResponseWriter, r *http.Request) {
 	id, err := pathInt64(r, "id")
 	if err != nil {
@@ -263,6 +283,13 @@ func (s *Server) handleSetKeeper(w http.ResponseWriter, r *http.Request) {
 	var req setKeeperReq
 	if err := decodeBody(r, &req); err != nil {
 		fail(w, err)
+		return
+	}
+	// 先确认分组属于当前激活批次：下面的清零/设 keeper 不是同一事务，
+	// 若放到最后才发现批次不对，历史批次的保留项已经被清掉了。
+	var inBatch int
+	if err := s.st.Get(r.Context(), &inBatch, `SELECT batch_active FROM dup_groups WHERE id=?`, id); err != nil || inBatch != 1 {
+		fail(w, badRequest("分组不存在或不属于当前结果批次，请先切换批次"))
 		return
 	}
 	var exists int
@@ -276,7 +303,7 @@ func (s *Server) handleSetKeeper(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 先把组内 keeper 全部清零，再设置新的
+	// 先把组内 keeper 全部清零，再设置新的；同时解除该组的自动保留条件
 	if _, err := s.st.Exec(r.Context(),
 		`UPDATE dup_group_members SET is_keeper=0, keep_reason=NULL WHERE group_id=?`, id); err != nil {
 		fail(w, err)
@@ -284,18 +311,30 @@ func (s *Server) handleSetKeeper(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := s.st.Exec(r.Context(),
 		`UPDATE dup_group_members SET is_keeper=1, keep_reason=? WHERE group_id=? AND file_id=?`,
-		"用户手动指定", id, req.FileID); err != nil {
+		"用户手动指定（已解除该组保留条件）", id, req.FileID); err != nil {
+		fail(w, err)
+		return
+	}
+	if _, err := s.st.Exec(r.Context(),
+		`UPDATE dup_groups SET keeper_rule='', updated_at=? WHERE id=? AND batch_active=1`, store.NowMS(), id); err != nil {
+		fail(w, err)
+		return
+	}
+	// 相似组的成员体积不同，换 keeper 后必须重算「可回收空间」，否则汇总数字是旧的
+	if err := keeper.RefreshGroupSizes(r.Context(), s.st, id); err != nil {
 		fail(w, err)
 		return
 	}
 	s.st.Audit(r.Context(), actorOf(r), "group.set_keeper", "dup_group", fmt.Sprint(id),
-		map[string]any{"file_id": req.FileID}, clientIP(r))
+		map[string]any{"file_id": req.FileID, "keeper_rule_cleared": true}, clientIP(r))
 
 	var g Group
 	if err := s.st.Get(r.Context(), []any{&g.ID, &g.Kind, &g.Signature, &g.Size, &g.MemberCount,
-		&g.TotalBytes, &g.ReclaimableBytes, &g.AvgSimilarity, &g.CreatedAt},
+		&g.TotalBytes, &g.ReclaimableBytes, &g.AvgSimilarity, &g.Evidence,
+		&g.KeeperRule, &g.CreatedAt},
 		`SELECT id, kind, signature, size, member_count, total_bytes, reclaimable_bytes,
-		        avg_similarity, created_at FROM dup_groups WHERE id=?`, id); err != nil {
+		        avg_similarity, evidence, COALESCE(keeper_rule,''), created_at
+		 FROM dup_groups WHERE id=? AND batch_active=1`, id); err != nil {
 		fail(w, err)
 		return
 	}

@@ -1,7 +1,9 @@
 import type {
   Bootstrap,
   BrowseResult,
+  BatchList,
   CleanItem,
+  CleanItemFilter,
   CleanItemsResult,
   CleanTask,
   DashboardData,
@@ -10,11 +12,15 @@ import type {
   FileDetail,
   GroupKind,
   GroupSummary,
+  KeeperRuleState,
+  KeeperRuleStats,
   LibraryStats,
   LoginResult,
   MeResult,
   Page,
+  ProxyState,
   QuarantineItem,
+  QuarantineOrigin,
   Root,
   Rule,
   ScanErrorRow,
@@ -23,6 +29,7 @@ import type {
   SettingsPayload,
   SuggestionsResult,
   SystemInfo,
+  TrustAllResult,
   User,
 } from "./types";
 
@@ -154,12 +161,44 @@ export const api = {
   groupSummary: () => request<GroupSummary>("/groups/summary"),
   setKeeper: (groupId: number, fileId: number) =>
     request<DupGroup>(`/groups/${groupId}/keeper`, { method: "POST", ...json({ file_id: fileId }) }),
+  /** 读取某类分组的保留条件、口径定义与创建时间可用率 */
+  keeperRule: (kind: GroupKind | string) =>
+    request<KeeperRuleState>(`/groups/keeper-rule${qs({ kind })}`),
+  /** 一键按条件智能设定保留项；group_id 省略时作用于整类并持久化 */
+  applyKeeperRule: (body: { kind: GroupKind | string; rule: string; group_id?: number }) =>
+    request<{ ok: boolean; stats: KeeperRuleStats; defaults: Record<string, string> }>(
+      "/groups/keeper-rule",
+      { method: "POST", ...json(body) },
+    ),
+
+  /* ---------- 结果批次与校验等级 ---------- */
+  /** 列出每次扫描各自留存的分组结果，用于切换查看 */
+  batches: () => request<BatchList>("/groups/batches"),
+  /** 切换当前查看的结果批次（不重算，只换 batch_active 标记） */
+  switchBatch: (scanTaskId: number) =>
+    request<{ ok: boolean; active_task_id: number }>("/groups/batch", {
+      method: "POST",
+      ...json({ scan_task_id: scanTaskId }),
+    }),
+  /** 把当前批次全部「未校验」分组标为免校验（restore=true 则撤销） */
+  trustAll: (restore = false) =>
+    request<TrustAllResult>("/groups/trust-all", {
+      method: "POST",
+      ...json({ ack: true, restore }),
+    }),
 
   /* ---------- 文件与媒体 ---------- */
   file: (id: number) => request<FileDetail>(`/files/${id}`),
   thumbUrl: (id: number, w = 360) => `${BASE}/files/${id}/thumb?w=${w}`,
   rawUrl: (id: number) => `${BASE}/files/${id}/raw`,
   proxyUrl: (id: number) => `${BASE}/files/${id}/proxy`,
+  /** 查询转码预览状态；idle 时顺带启动后台转码，请求不会阻塞。 */
+  proxyStatus: (id: number) =>
+    request<ProxyState>(`/files/${id}/proxy?probe=1`, { cache: "no-store" }),
+  /** 隔离区实体文件的直链（预览/下载，支持 Range）。 */
+  quarantineFileUrl: (id: number) => `${BASE}/quarantine/${id}/file`,
+  /** 隔离区实体文件的缩略图（图片缩放 / 视频抽帧）。 */
+  quarantineThumbUrl: (id: number, w = 360) => `${BASE}/quarantine/${id}/thumb?w=${w}`,
 
   /* ---------- 规则 ---------- */
   rules: () => request<{ items: Rule[] }>("/rules"),
@@ -177,15 +216,34 @@ export const api = {
   cleanTasks: (limit = 50, offset = 0) =>
     request<{ items: CleanTask[]; total: number }>(`/clean/tasks${qs({ limit, offset })}`),
   cleanTask: (id: number) => request<CleanTask>(`/clean/tasks/${id}`),
-  cleanItems: (id: number) => request<CleanItemsResult>(`/clean/tasks/${id}/items`),
+  /**
+   * 任务明细分页。默认全部；界面通常只取 filter=pending 的「正在执行 + 即将执行」，
+   * 其余按需懒加载 —— 一次返回几千行会把浏览器卡死。
+   */
+  cleanItems: (
+    id: number,
+    opts: { filter?: CleanItemFilter; limit?: number; offset?: number } = {},
+  ) => {
+    const { filter = "all", limit = 200, offset = 0 } = opts;
+    return request<CleanItemsResult>(`/clean/tasks/${id}/items${qs({ filter, limit, offset })}`);
+  },
   createCleanTask: (body: {
     name?: string;
     rule_ids?: number[];
     file_ids?: number[];
+    /** 一键清理：把该类型全部重复组的非保留副本纳入计划 */
+    group_kind?: GroupKind | string;
     execute_mode?: "quarantine" | "permanent";
   }) => request<CleanTask>("/clean/tasks", { method: "POST", ...json(body) }),
-  executeClean: (id: number) =>
-    request<{ ok: boolean; message: string }>(`/clean/tasks/${id}/execute`, { method: "POST" }),
+  executeClean: (id: number, skipVerify = false) =>
+    request<{ ok: boolean; message: string }>(`/clean/tasks/${id}/execute`, {
+      method: "POST",
+      ...json({ skip_verify: skipVerify }),
+    }),
+  pauseClean: (id: number) =>
+    request<{ ok: boolean; message: string }>(`/clean/tasks/${id}/pause`, { method: "POST" }),
+  resumeClean: (id: number) =>
+    request<{ ok: boolean; message: string }>(`/clean/tasks/${id}/resume`, { method: "POST" }),
   cancelClean: (id: number) =>
     request<{ ok: boolean }>(`/clean/tasks/${id}/cancel`, { method: "POST" }),
   deleteCleanTask: (id: number) => request<{ ok: boolean }>(`/clean/tasks/${id}`, { method: "DELETE" }),
@@ -202,6 +260,11 @@ export const api = {
       retention_days: number;
     }>(`/quarantine${qs({ status, limit, offset })}`),
   quarantineItem: (id: number) => request<QuarantineItem>(`/quarantine/${id}`),
+  /** 反查隔离文件的主本（不需要重新扫描） */
+  quarantineOrigin: (id: number) => request<QuarantineOrigin>(`/quarantine/${id}/origin`),
+  /** 按隔离区文件名（内容哈希，可带扩展名）反查 */
+  quarantineOriginByHash: (hash: string) =>
+    request<QuarantineOrigin>(`/quarantine/origin${qs({ hash })}`),
   restore: (id: number) => request<{ ok: boolean }>(`/quarantine/${id}/restore`, { method: "POST" }),
   purge: (id: number) => request<{ ok: boolean }>(`/quarantine/${id}`, { method: "DELETE" }),
   purgeExpired: () =>

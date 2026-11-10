@@ -36,16 +36,17 @@ var upsertSQL = buildUpsertSQL()
 func buildUpsertSQL() string {
 	inv := invalidateCond()
 	return `
-INSERT INTO files(root_id, path, dir_path, name, stem, ext, size, mtime_ns, ctime_ns,
+INSERT INTO files(root_id, path, dir_path, name, stem, ext, size, mtime_ns, ctime_ns, btime_ns,
                   dev, inode, is_symlink, media_kind, state, scan_task_id, last_seen_at,
                   created_at, updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?)
 ON CONFLICT(root_id, path) DO UPDATE SET
   dir_path     = excluded.dir_path,
   name         = excluded.name,
   stem         = excluded.stem,
   ext          = excluded.ext,
   ctime_ns     = excluded.ctime_ns,
+  btime_ns     = excluded.btime_ns,
   dev          = excluded.dev,
   inode        = excluded.inode,
   is_symlink   = excluded.is_symlink,
@@ -92,7 +93,7 @@ func (ix *Indexer) Add(ctx context.Context, e Entry) error {
 		}
 	}
 	if _, err := ix.stmt.ExecContext(ctx,
-		e.RootID, e.Path, e.DirPath, e.Name, e.Stem, e.Ext, e.Size, e.MtimeNS, e.CtimeNS,
+		e.RootID, e.Path, e.DirPath, e.Name, e.Stem, e.Ext, e.Size, e.MtimeNS, e.CtimeNS, e.BtimeNS,
 		e.Dev, e.Inode, boolInt(e.IsSymlink), e.Kind, ix.taskID, ix.now,
 		ix.now, ix.now); err != nil {
 		return fmt.Errorf("insert %s: %w", e.Path, err)

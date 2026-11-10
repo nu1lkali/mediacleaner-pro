@@ -16,9 +16,18 @@ export function CardHeader({ className, children, action }: { className?: string
 
 export function CardTitle({ children, hint }: { children: ReactNode; hint?: string }) {
   return (
-    <div>
-      <h3 className="truncate text-sm font-semibold text-foreground">{children}</h3>
-      {hint ? <p className="mt-0.5 text-xs text-muted-foreground">{hint}</p> : null}
+    <div className="min-w-0">
+      <h3
+        className="truncate text-sm font-semibold text-foreground"
+        title={typeof children === "string" ? children : undefined}
+      >
+        {children}
+      </h3>
+      {hint ? (
+        <p className="mt-0.5 truncate text-xs text-muted-foreground" title={hint}>
+          {hint}
+        </p>
+      ) : null}
     </div>
   );
 }

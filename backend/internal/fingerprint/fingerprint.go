@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"hash"
 	"io"
 	"os"
 
@@ -18,6 +19,25 @@ import (
 
 	"mediacleaner/internal/throttle"
 )
+
+// 算法名：与 quarantine_items.hash_algo 的取值一一对应。
+const (
+	AlgoBLAKE3 = "blake3"
+	AlgoSHA256 = "sha256"
+	AlgoNone   = "none"
+)
+
+// NewHasher 返回与算法名匹配的哈希器（nil = 不需要算哈希）。
+// 隔离区复制时需要「边写边算」，所以这里要求返回可增量写入的 hash.Hash。
+func NewHasher(algo string) hash.Hash {
+	switch algo {
+	case AlgoBLAKE3:
+		return blake3.New()
+	case AlgoSHA256:
+		return sha256.New()
+	}
+	return nil
+}
 
 var ErrAborted = errors.New("hash aborted")
 

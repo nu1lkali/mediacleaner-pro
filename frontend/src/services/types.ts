@@ -88,6 +88,10 @@ export interface ScanOptions {
   detect_exact: boolean;
   detect_similar_image: boolean;
   detect_similar_video: boolean;
+  /** true 时扫描阶段不做全文校验，分组证据为 sampled，清理前再逐字节比对 */
+  defer_verify: boolean;
+  /** true 时连清理前的比对也跳过，分组证据为 trusted（高风险，需用户确认） */
+  skip_verify: boolean;
   only_kinds: string[];
   min_file_size: number;
   exclude_dirs: string[];
@@ -146,6 +150,7 @@ export interface ScanProfile {
   detect_exact: boolean;
   detect_image: boolean;
   detect_video: boolean;
+  defer_verify?: boolean;
   need_ffmpeg: boolean;
 }
 
@@ -164,6 +169,10 @@ export interface GroupMember {
   size: number;
   media_kind: MediaKind;
   mtime_ns: number;
+  /** inode 变更时间；Linux 上不是创建时间 */
+  ctime_ns: number;
+  /** 真实创建（出生）时间；0 = 文件系统未提供 */
+  btime_ns: number;
   similarity: number;
   is_keeper: boolean;
   keep_reason: string;
@@ -188,8 +197,46 @@ export interface DupGroup {
   total_bytes: number;
   reclaimable_bytes: number;
   avg_similarity: number;
+  /** exact=已全文校验；sampled=仅采样一致，清理前自动复验；
+   *  trusted=用户确认免校验，清理时不比对；similar=感知哈希相似 */
+  evidence: "exact" | "sampled" | "trusted" | "similar" | string;
+  /** 同组保留条件；空串 = 未配置，保持原有去重行为 */
+  keeper_rule: string;
   created_at: number;
   members: GroupMember[];
+}
+
+/** 「同组保留条件」的条件定义，由后端下发，保证口径与前端文案一致。 */
+export interface KeeperRuleDef {
+  id: string;
+  label: string;
+  field: string;
+  criteria: string;
+  scope: string;
+  needs_btime: boolean;
+}
+
+export interface KeeperRuleState {
+  kind: GroupKind;
+  /** 该类型当前保存的默认条件；空串 = 未配置 */
+  rule: string;
+  defaults: Record<string, string>;
+  definitions: KeeperRuleDef[];
+  groups: number;
+  configured: number;
+  btime_known: number;
+  btime_total: number;
+  settings_key: string;
+}
+
+export interface KeeperRuleStats {
+  kind: string;
+  rule: string;
+  groups: number;
+  changed: number;
+  unavailable: number;
+  protected: number;
+  group_id?: number;
 }
 
 export interface GroupSummaryItem {
@@ -204,6 +251,48 @@ export interface GroupSummary {
   total_groups: number;
   removable_files: number;
   reclaimable: number;
+}
+
+/** 一次扫描任务独立留存的分组结果批次。 */
+export interface ScanBatch {
+  scan_task_id: number;
+  name: string;
+  status: ScanStatus;
+  finished_at: number;
+  groups: number;
+  removable: number;
+  bytes: number;
+  /** 扫描时已全文校验的分组数 */
+  verified: number;
+  /** 仅采样、清理前会逐字节复验的分组数 */
+  unverified: number;
+  /** 用户确认免校验、清理时不比对的分组数 */
+  trusted: number;
+  skip_verify: boolean;
+  active: boolean;
+}
+
+export interface BatchList {
+  items: ScanBatch[];
+  active_task_id: number;
+  total: number;
+}
+
+export interface TrustAllResult {
+  ok: boolean;
+  changed: number;
+  restore: boolean;
+  active_task_id: number;
+}
+
+/** 视频预览代理状态（GET /api/files/{id}/proxy?probe=1）。 */
+export interface ProxyState {
+  status: "idle" | "running" | "ready" | "failed" | "unavailable";
+  percent?: number;
+  reason?: string;
+  message?: string;
+  /** true = 浏览器可直接播放原文件，无需转码 */
+  direct?: boolean;
 }
 
 export interface MediaInfo {
@@ -373,7 +462,7 @@ export interface CleanTask {
   id: number;
   name: string;
   rule_id: number;
-  status: "draft" | "running" | "succeeded" | "failed" | "canceled";
+  status: "draft" | "running" | "paused" | "succeeded" | "failed" | "canceled";
   execute_mode: "quarantine" | "permanent";
   stats: Record<string, unknown>;
   created_at: number;
@@ -405,13 +494,26 @@ export interface CleanItem {
   expected_mtime_ns: number;
 }
 
+export type CleanItemFilter = "pending" | "done" | "failed" | "skipped" | "all";
+
 export interface CleanItemsResult {
+  /** 当前分页的明细；总数看下面的计数，不要用 items.length */
   items: CleanItem[];
+  filter: CleanItemFilter;
+  limit: number;
+  offset: number;
+  /** 整张任务的计数（不受分页影响） */
   total: number;
   selected: number;
+  pending: number;
+  done: number;
+  failed: number;
+  skipped: number;
   total_bytes: number;
   selected_bytes: number;
-  by_kind: Record<string, { count: number; bytes: number }>;
+  /** 当前 filter 命中的总数，用于「加载更多」判断 */
+  matched: number;
+  has_more: boolean;
 }
 
 export interface QuarantineItem {
@@ -429,6 +531,33 @@ export interface QuarantineItem {
   expires_at: number;
   restored_at: number | null;
   message: string;
+}
+
+/** 隔离文件的主本候选：仍在索引里的同内容文件 */
+export interface QuarantineOriginMatch {
+  file_id: number;
+  path: string;
+  name: string;
+  dir: string;
+  media_kind: string;
+  size: number;
+  mtime_ns: number;
+  state: string;
+  is_keeper: boolean;
+}
+
+/** 隔离文件反查主本的结果 */
+export interface QuarantineOrigin {
+  quarantine_id: number;
+  orig_path: string;
+  hash: string;
+  hash_algo: string;
+  /** 隔离文件自身的类型（预览用） */
+  media_kind: string;
+  /** group=隔离时的分组关系；hash=全文 BLAKE3 匹配；none=找不到 */
+  method: "group" | "hash" | "none";
+  note: string;
+  matches: QuarantineOriginMatch[];
 }
 
 /* ---------- 统计 ---------- */

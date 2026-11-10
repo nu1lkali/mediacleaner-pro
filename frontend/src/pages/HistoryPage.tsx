@@ -178,6 +178,7 @@ function ScanDetail({ id }: { id: number }) {
         <div className="grid gap-x-4 gap-y-1 px-3 py-2 text-[11.5px] sm:grid-cols-2">
           <KV k="预设" v={t.options.profile || "—"} />
           <KV k="完全重复" v={t.options.detect_exact ? "开" : "关"} />
+          <KV k="全文校验" v={t.options.defer_verify ? "延迟到清理前" : "扫描时完成"} />
           <KV k="相似图片" v={t.options.detect_similar_image ? "开" : "关"} />
           <KV k="相似视频" v={t.options.detect_similar_video ? "开" : "关"} />
           <KV k="最小体积" v={t.options.min_file_size ? formatBytes(t.options.min_file_size) : "不限"} />

@@ -105,6 +105,12 @@ type createScanReq struct {
 	DetectExact        *bool `json:"detect_exact"`
 	DetectSimilarImage *bool `json:"detect_similar_image"`
 	DetectSimilarVideo *bool `json:"detect_similar_video"`
+	// 延迟校验：null 表示按 Profile 预设（极速=开，其余=关）
+	DeferVerify *bool `json:"defer_verify"`
+	// 完全免校验：扫描不读全文，清理时也不与保留副本比对。
+	// 隐含 defer_verify=true；必须由界面二次确认后置 ack_skip_verify=true。
+	SkipVerify    *bool `json:"skip_verify"`
+	AckSkipVerify bool  `json:"ack_skip_verify"`
 
 	DeepProbe      bool `json:"deep_probe"`
 	FollowSymlinks bool `json:"follow_symlinks"`
@@ -188,6 +194,23 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		opts.DetectSimilarVideo = *req.DetectSimilarVideo
 	}
 	opts.ApplyProfile(explicit)
+	// 延迟校验：极速预设默认开启（分组只到采样证据，清理前再比对）。
+	// 这个字段不参与 ApplyProfile，避免任务重载时被预设覆盖掉用户显式选择。
+	if req.DeferVerify != nil {
+		opts.DeferVerify = *req.DeferVerify
+	} else if opts.Profile == scan.ProfileFast {
+		opts.DeferVerify = true
+	}
+	// 完全免校验：扫描不读全文，清理时也不比对。
+	// 必须带界面二次确认标记，防止脚本/误调用悄悄打开高风险选项。
+	if req.SkipVerify != nil && *req.SkipVerify {
+		if !req.AckSkipVerify {
+			fail(w, badRequest("启用「完全免校验」前请先确认风险提示"))
+			return
+		}
+		opts.SkipVerify = true
+		opts.DeferVerify = true
+	}
 	// 视频关键帧需要 ffmpeg，缺失时明确降级而不是静默失败
 	if opts.DetectSimilarVideo && !media.FFmpegAvailable() {
 		fail(w, badRequest("当前环境未检测到 ffmpeg，无法启用视频相似度检测。可改用「仅完全重复」预设。"))
@@ -209,8 +232,16 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, _ := res.LastInsertId()
+	auditDetail := map[string]any{
+		"mode": req.Mode, "roots": req.RootIDs,
+		"defer_verify": opts.DeferVerify, "skip_verify": opts.SkipVerify,
+	}
+	if opts.SkipVerify {
+		// 高风险选择必须留下可追溯记录：谁、什么时候、对哪一批关掉了校验
+		auditDetail["risk_accepted"] = "清理时不与保留副本逐字节比对，可能误删同大小不同内容的文件"
+	}
 	s.st.Audit(r.Context(), actorOf(r), "scan.create", "scan_task", fmt.Sprint(id),
-		map[string]any{"mode": req.Mode, "roots": req.RootIDs}, clientIP(r))
+		auditDetail, clientIP(r))
 	if err := s.eng.Enqueue(id); err != nil {
 		_, _ = s.st.Exec(r.Context(), `UPDATE scan_tasks SET status='failed', message=? WHERE id=?`, err.Error(), id)
 		fail(w, conflict(err.Error()))

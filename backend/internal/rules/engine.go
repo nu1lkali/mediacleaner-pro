@@ -622,7 +622,8 @@ func (e *Engine) loadGroups(ctx context.Context, kinds []string, minMembers int)
 	}
 	rows, err := e.st.Select(ctx, `
 		SELECT id, kind, signature, size, total_bytes, avg_similarity
-		FROM dup_groups WHERE kind IN (`+placeholders+`) AND member_count>=?`, append(args, minMembers)...)
+		FROM dup_groups WHERE kind IN (`+placeholders+`) AND member_count>=? AND batch_active=1`,
+		append(args, minMembers)...)
 	if err != nil {
 		return nil, err
 	}
@@ -655,7 +656,7 @@ func (e *Engine) loadGroups(ctx context.Context, kinds []string, minMembers int)
 		JOIN files f ON f.id=m.file_id
 		LEFT JOIN file_media md ON md.file_id=f.id
 		WHERE f.state='active' AND m.group_id IN (
-		  SELECT id FROM dup_groups WHERE kind IN (`+placeholders+`) AND member_count>=?
+		  SELECT id FROM dup_groups WHERE kind IN (`+placeholders+`) AND member_count>=? AND batch_active=1
 		)`, append(args, minMembers)...)
 	if err != nil {
 		return nil, err
@@ -711,7 +712,10 @@ func (e *Engine) writableRoots(ctx context.Context) (map[int64]bool, error) {
 }
 
 func (e *Engine) protectedIDs(ctx context.Context) (map[int64]bool, error) {
-	rows, err := e.st.Select(ctx, `SELECT file_id FROM dup_group_members WHERE is_keeper=1`)
+	rows, err := e.st.Select(ctx, `
+		SELECT m.file_id FROM dup_group_members m
+		JOIN dup_groups g ON g.id=m.group_id AND g.batch_active=1
+		WHERE m.is_keeper=1`)
 	if err != nil {
 		return nil, err
 	}

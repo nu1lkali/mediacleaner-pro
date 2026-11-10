@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS files (
   size INTEGER NOT NULL,
   mtime_ns INTEGER NOT NULL,
   ctime_ns INTEGER NOT NULL DEFAULT 0,
+  -- btime_ns 是「真实创建/出生时间」纳秒；0 表示该文件系统未提供（见 scan/fileinfo_linux.go）。
+  -- 与 ctime_ns 严格区分：Linux 的 ctime 是 inode 变更时间，chmod/chown 都会刷新，不能当创建时间用。
+  btime_ns INTEGER NOT NULL DEFAULT 0,
   dev INTEGER NOT NULL DEFAULT 0,
   inode INTEGER NOT NULL DEFAULT 0,
   is_symlink INTEGER NOT NULL DEFAULT 0,
@@ -82,11 +85,24 @@ CREATE TABLE IF NOT EXISTS dup_groups (
   total_bytes INTEGER NOT NULL DEFAULT 0,
   reclaimable_bytes INTEGER NOT NULL DEFAULT 0,
   avg_similarity REAL NOT NULL DEFAULT 0,
-  scan_task_id INTEGER,
+  evidence TEXT NOT NULL DEFAULT 'exact',
+  -- keeper_rule 是「同组保留条件」：空串=未配置，保持原有去重行为（手动指定/默认路径最浅）。
+  -- 非空时，一键应用与执行清理前都会按该条件重新判定组内唯一保留文件。
+  keeper_rule TEXT NOT NULL DEFAULT '',
+  -- batch_active=1 表示当前界面正在展示的批次。每次扫描单独产出一批分组快照，
+  -- 旧批次置 0 归档但仍保留、可在界面切回查看；同一时刻只有一个批次为 1。
+  batch_active INTEGER NOT NULL DEFAULT 1,
+  -- 产出这批分组的扫描任务。0 = 旧库遗留/未知任务。
+  scan_task_id INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS ux_groups_sig ON dup_groups(kind, signature);
+-- 注意：批次相关的两个索引（ux_groups_batch / ix_groups_batch）不在这里创建。
+-- 它们引用的 batch_active、scan_task_id 对旧库而言是 ensureColumns() 才补的列，
+-- 而 schemaSQL 先于迁移执行；写在这里会让旧库在启动第一步就报
+-- "apply schema: no such column: batch_active"，新库反而正常，极易漏测。
+-- 统一放到 store.ensureIndexes()（在 ensureColumns 之后执行），新库旧库都覆盖。
+-- 同一任务内签名唯一；不同任务允许产出完全相同的分组，结果不再互相覆盖。
 CREATE INDEX IF NOT EXISTS ix_groups_kind ON dup_groups(kind, reclaimable_bytes DESC);
 
 CREATE TABLE IF NOT EXISTS dup_group_members (
@@ -202,7 +218,12 @@ CREATE TABLE IF NOT EXISTS quarantine_items (
   root_id INTEGER,
   stored_path TEXT NOT NULL,
   size INTEGER NOT NULL,
+  -- sha256 存「隔离时用来命名去重的那个值」，具体算法见 hash_algo：
+  --   blake3 = 复用了扫描/清理前复验算出的 BLAKE3（隔离时零读盘）
+  --   sha256 = 现场算的 SHA-256（没有可用哈希时的兜底）
+  --   none   = 完全免校验模式，用 mtime/size 派生键，不做内容去重
   sha256 TEXT NOT NULL,
+  hash_algo TEXT NOT NULL DEFAULT 'sha256',
   media_kind TEXT,
   rule_id INTEGER,
   clean_task_id INTEGER,

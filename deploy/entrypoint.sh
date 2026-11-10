@@ -156,8 +156,14 @@ probe_roots() {
         if su-exec "$PUID:$PGID" sh -c 'test -r "$1" && test -x "$1"' _ "$p" 2>/dev/null; then
             log "扫描卷可读：$p"
         else
-            log "警告：扫描卷不可读：$p（$(stat -c '%a %U:%G' "$p" 2>/dev/null)），运行身份 ${PUID}:${PGID} 无权访问"
-            log "      处理方式：把 .env 的 PUID/PGID 改成该目录属主，或用 --run-as-root 重新部署"
+            PERM="$(stat -c '%a %U:%G' "$p" 2>/dev/null)"
+            if [ "$PUID" = "0" ]; then
+                log "警告：扫描卷不可读：$p（$PERM），已以 root 运行仍无法读取"
+                log "      处理方式：确认该目录确实挂载进容器，并在 DSM 共享文件夹里开读权限（群晖 ACL 可能连 root 一起限制）"
+            else
+                log "警告：扫描卷不可读：$p（$PERM），运行身份 ${PUID}:${PGID} 无权访问"
+                log "      处理方式：把 .env 的 PUID/PGID 改成该目录属主，或用 --run-as-root 重新部署"
+            fi
         fi
         IFS=';'
     done

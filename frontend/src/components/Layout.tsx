@@ -28,6 +28,7 @@ import { useTheme } from "../lib/theme";
 import { cn, formatBytes, formatNumber, statusText } from "../lib/utils";
 
 const NAV = [
+  { to: "/wizard", label: "一键清理", icon: Sparkles },
   { to: "/dashboard", label: "总览", icon: LayoutDashboard },
   { to: "/scan", label: "媒体扫描", icon: ScanLine },
   { to: "/duplicates", label: "完全重复", icon: Copy },

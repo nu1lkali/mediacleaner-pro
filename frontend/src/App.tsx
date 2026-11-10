@@ -3,6 +3,7 @@ import { Loader2 } from "lucide-react";
 import { useAuth } from "./lib/auth";
 import Layout from "./components/Layout";
 import LoginPage from "./pages/LoginPage";
+import WizardPage from "./pages/WizardPage";
 import DashboardPage from "./pages/DashboardPage";
 import ScanPage from "./pages/ScanPage";
 import GroupsPage from "./pages/GroupsPage";
@@ -49,7 +50,8 @@ export default function App() {
           </RequireAuth>
         }
       >
-        <Route index element={<Navigate to="/dashboard" replace />} />
+        <Route index element={<Navigate to="/wizard" replace />} />
+        <Route path="wizard" element={<WizardPage />} />
         <Route path="dashboard" element={<DashboardPage />} />
         <Route path="scan" element={<ScanPage />} />
         <Route path="duplicates" element={<GroupsPage kind="exact" />} />

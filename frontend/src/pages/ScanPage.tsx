@@ -28,6 +28,7 @@ import { Button } from "../components/ui/button";
 import { Checkbox, Field, Input, Select, Switch, TagInput } from "../components/ui/field";
 import { EmptyState, Loading, PageHeader, Section } from "../components/ui/empty";
 import { Progress, Ring } from "../components/ui/progress";
+import { ConfirmDialog } from "../components/ui/dialog";
 import { DirectoryPicker } from "../components/DirectoryPicker";
 import { cn, formatBytes, formatDate, formatNumber, phaseText, statusText, statusTone } from "../lib/utils";
 
@@ -77,6 +78,11 @@ export default function ScanPage() {
   const [limitMBps, setLimitMBps] = useState(0);
   const [deepProbe, setDeepProbe] = useState(false);
   const [followSymlinks, setFollowSymlinks] = useState(false);
+  // 跳过全文校验：默认跟随预设（极速=开），用户手动切换后以开关为准
+  const [deferVerify, setDeferVerify] = useState(true);
+  // 完全免校验：扫描不读全文 + 清理时也不比对。默认关闭，勾选需二次确认
+  const [skipVerify, setSkipVerify] = useState(false);
+  const [skipConfirmOpen, setSkipConfirmOpen] = useState(false);
   const [includeOther, setIncludeOther] = useState(false);
   const [fullRescan, setFullRescan] = useState(false);
   const [advanced, setAdvanced] = useState(false);
@@ -111,6 +117,16 @@ export default function ScanPage() {
       image: p.detect_image,
       video: p.detect_video && ffmpegOK,
     });
+    setDeferVerify(!!p.defer_verify);
+    // 换预设一律收回高风险选项，避免从「极速」切到别的模式时悄悄带着免校验
+    setSkipVerify(false);
+  };
+
+  // 完全免校验必须由用户明确点一次确认，不允许勾选预设或脚本直接打开
+  const confirmSkipVerify = () => {
+    setSkipVerify(true);
+    setDeferVerify(true);
+    setSkipConfirmOpen(false);
   };
 
   // 手动改开关后，profile 变为"自定义"
@@ -136,6 +152,9 @@ export default function ScanPage() {
         detect_exact: detect.exact,
         detect_similar_image: detect.image,
         detect_similar_video: detect.video,
+        defer_verify: deferVerify || skipVerify,
+        skip_verify: skipVerify,
+        ack_skip_verify: skipVerify,
         only_kinds: onlyKinds,
         min_file_size: Math.round(minSizeMB * 1024 * 1024),
         exclude_dirs: excludeDirs,
@@ -239,7 +258,7 @@ export default function ScanPage() {
               <DetectRow
                 icon={<Copy className="h-3.5 w-3.5" />}
                 title="完全重复（逐字节一致）"
-                desc="元数据索引 → 采样指纹 → 全文 SHA-256 校验。不解码媒体、不调用 ffmpeg。"
+                desc="元数据索引 → 采样指纹 → 全文 BLAKE3 校验。不解码媒体、不调用 ffmpeg；也可选「跳过全文校验」加快速度。"
                 checked={detect.exact}
                 onChange={(v) => setOne("exact", v)}
                 cost="低"
@@ -464,6 +483,36 @@ export default function ScanPage() {
 
                 <div className="space-y-2.5 pt-1">
                   <Switch
+                    checked={deferVerify || skipVerify}
+                    onChange={setDeferVerify}
+                    disabled={skipVerify}
+                    label="跳过全文校验（快很多）"
+                    hint="只比采样指纹就分组，执行清理前再逐字节比对"
+                  />
+                  <div
+                    className={cn(
+                      "rounded-md border p-2.5 transition-colors",
+                      skipVerify ? "border-destructive/40 bg-destructive/[0.05]" : "border-border",
+                    )}
+                  >
+                    <Switch
+                      checked={skipVerify}
+                      onChange={(v) => (v ? setSkipConfirmOpen(true) : setSkipVerify(false))}
+                      label="完全免校验：这批直接不比对"
+                      hint="扫描不读全文，清理时也不与保留副本比对"
+                    />
+                    {skipVerify && (
+                      <div className="mt-2 flex items-start gap-2 text-[11.5px] leading-relaxed text-destructive">
+                        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                        <span>
+                          高风险：分组只比过文件大小与 4 段采样，清理时不会复核内容，
+                          同大小但内容不同的文件会被当成副本删除。请只对确定由复制产生的目录使用，
+                          并保持「移入隔离区」以便恢复。该选择会写入扫描参数与审计日志。
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                  <Switch
                     checked={deepProbe}
                     onChange={setDeepProbe}
                     label="深度探测元数据"
@@ -502,6 +551,12 @@ export default function ScanPage() {
               </span>
             </span>
             <span>模式：{fullRescan ? "全量" : "增量"}</span>
+            <span>
+              校验：
+              <span className={cn("font-medium", skipVerify ? "text-destructive" : "text-foreground")}>
+                {skipVerify ? "完全免校验（有风险）" : deferVerify ? "采样 + 清理前复验" : "全文校验"}
+              </span>
+            </span>
           </div>
           <div className="flex items-center gap-2">
             {noneSelected && (
@@ -605,6 +660,29 @@ export default function ScanPage() {
           )}
         </Card>
       </div>
+
+      <ConfirmDialog
+        open={skipConfirmOpen}
+        onClose={() => setSkipConfirmOpen(false)}
+        onConfirm={confirmSkipVerify}
+        title="确认关闭本批分组的全部内容校验？"
+        confirmText="我已了解风险，仍然关闭"
+        danger
+        desc={
+          <>
+            勾选后，本次扫描<b>不读全文</b>，产出的分组在<b>执行清理时也不会与保留副本逐字节比对</b>，
+            可以直接批量删除。
+            <div className="mt-2 text-destructive">
+              风险：分组只依据「文件大小 + 4 段采样指纹」判定。若存在大小相同、采样段也碰巧相同、
+              但内容不同的文件，它们会被当成重复副本一起删除。
+            </div>
+            <div className="mt-2">
+              建议只用于确定由复制/备份产生的目录，并保留默认的「移入隔离区」以便恢复。
+              此选择会记录到扫描参数与审计日志；之后可在结果页点「撤销免校验」恢复比对。
+            </div>
+          </>
+        }
+      />
 
       <DirectoryPicker
         open={pickerOpen}

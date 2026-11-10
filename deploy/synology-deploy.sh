@@ -760,6 +760,14 @@ if [ "$READY" != "1" ]; then
     [ -n "${RUN_PGID:-}" ] || RUN_PGID=100
 
     case "$LOGS" in
+        *"apply schema"*|*"no such column"*|*"migrate index"*|*"SQL logic error"*)
+            printf '\n'
+            warn "原因：数据库结构迁移失败（旧库缺列，或索引引用了尚未添加的列），不是权限、也不是端口问题。"
+            info "  证据：日志含 'apply schema' / 'no such column'；chown、chmod、换端口都无效。"
+            info "  处理：确认已同步最新 backend/internal/store/schema.go 与 store.go，再重新构建："
+            info "    sudo bash deploy/synology-deploy.sh --rebuild"
+            info "  排查：开发机上跑 python tools/schemacheck.py 可对真实库做迁移演练（不改动生产库）。"
+            ;;
         *"打开数据库失败"*|*"unable to open database"*|*"仍然不可写"*)
             printf '\n'
             warn "原因：容器内的 /data 无法写入（SQLite 建库失败），不是端口问题。"

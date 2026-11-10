@@ -3,19 +3,23 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   Clock,
+  Crosshair,
   Eye,
   HardDriveDownload,
+  Play,
   RotateCcw,
+  Search,
   ShieldCheck,
   Trash2,
 } from "lucide-react";
 import { api } from "../services/api";
-import type { QuarantineItem } from "../services/types";
+import type { QuarantineItem, QuarantineOriginMatch } from "../services/types";
 import { Badge, Card, CardBody, CardHeader, CardTitle } from "../components/ui/card";
 import { Button } from "../components/ui/button";
 import { Input, Select } from "../components/ui/field";
 import { ConfirmDialog, Dialog } from "../components/ui/dialog";
 import { EmptyState, ErrorBox, Loading, PageHeader } from "../components/ui/empty";
+import { Preview, Thumb } from "../components/Thumb";
 import { cn, formatBytes, formatDate, formatNumber, kindLabel, statusText, statusTone } from "../lib/utils";
 
 export default function QuarantinePage() {
@@ -26,6 +30,13 @@ export default function QuarantinePage() {
   const [purgeTarget, setPurgeTarget] = useState<QuarantineItem | null>(null);
   const [purgeExpiredOpen, setPurgeExpiredOpen] = useState(false);
   const [detailId, setDetailId] = useState<number | null>(null);
+  // 主本反查：按隔离记录 id 或直接粘贴隔离文件名的哈希查保留副本，不需要重新扫描
+  const [originId, setOriginId] = useState<number | null>(null);
+  const [originHash, setOriginHash] = useState<string | null>(null);
+  const [hashInput, setHashInput] = useState("");
+  const [preview, setPreview] = useState<
+    { fileId?: number; quarantineId?: number; kind: string; name: string } | null
+  >(null);
 
   const q = useQuery({
     queryKey: ["quarantine", status],
@@ -38,6 +49,26 @@ export default function QuarantinePage() {
     queryFn: () => api.quarantineItem(detailId as number),
     enabled: detailId != null,
   });
+
+  const origin = useQuery({
+    queryKey: ["quarantine-origin", originId, originHash],
+    queryFn: () =>
+      originId != null ? api.quarantineOrigin(originId) : api.quarantineOriginByHash(originHash as string),
+    enabled: originId != null || originHash != null,
+  });
+
+  const originOpen = originId != null || originHash != null;
+  const closeOrigin = () => {
+    setOriginId(null);
+    setOriginHash(null);
+  };
+  // 粘贴完整隔离文件名也行：剥掉扩展名后提交
+  const submitHash = () => {
+    const h = hashInput.trim().replace(/\.[A-Za-z0-9]{1,8}$/, "");
+    if (!h) return;
+    setOriginId(null);
+    setOriginHash(h);
+  };
 
   const restore = useMutation({
     mutationFn: (id: number) => api.restore(id),
@@ -83,6 +114,28 @@ export default function QuarantinePage() {
                 placeholder="搜索原始路径"
                 className="h-8 w-full text-[12px] sm:w-[190px]"
               />
+            </div>
+            <div className="flex w-full items-center gap-1 sm:w-auto">
+              <Input
+                value={hashInput}
+                onChange={(e) => setHashInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") submitHash();
+                }}
+                placeholder="粘贴哈希反查主本，如 fc5d2032…"
+                className="h-8 w-full text-[12px] sm:w-[220px]"
+                spellCheck={false}
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 shrink-0"
+                icon={<Search className="h-3.5 w-3.5" />}
+                onClick={submitHash}
+                disabled={!hashInput.trim()}
+              >
+                反查
+              </Button>
             </div>
             <Select value={status} onChange={(e) => setStatus(e.target.value)} className="h-8 flex-1 text-[12px] sm:w-[130px] sm:flex-none">
               <option value="quarantined">待处理</option>
@@ -149,7 +202,7 @@ export default function QuarantinePage() {
                     <th className="w-[96px]">状态</th>
                     <th className="w-[126px]">隔离时间</th>
                     <th className="w-[126px]">到期时间</th>
-                    <th className="w-[130px]" />
+                    <th className="w-[150px]" />
                   </tr>
                 </thead>
                 <tbody>
@@ -183,6 +236,33 @@ export default function QuarantinePage() {
                               icon={<Eye className="h-3.5 w-3.5" />}
                               onClick={() => setDetailId(it.id)}
                             />
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              title="反查主本（仍在库里的同内容文件）"
+                              icon={<Crosshair className="h-3.5 w-3.5" />}
+                              onClick={() => {
+                                setOriginHash(null);
+                                setOriginId(it.id);
+                              }}
+                            >
+                              主本
+                            </Button>
+                            {it.status === "quarantined" && (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                title="预览隔离区里的这份文件"
+                                icon={<Play className="h-3.5 w-3.5" />}
+                                onClick={() =>
+                                  setPreview({
+                                    quarantineId: it.id,
+                                    kind: it.media_kind,
+                                    name: it.orig_path.split(/[\\/]/).pop() ?? it.orig_path,
+                                  })
+                                }
+                              />
+                            )}
                             {it.status === "quarantined" && (
                               <>
                                 <Button
@@ -288,6 +368,105 @@ export default function QuarantinePage() {
         ) : null}
       </Dialog>
 
+      <Dialog
+        open={originOpen}
+        onClose={closeOrigin}
+        title="主本反查"
+        desc={
+          origin.data
+            ? originHash != null
+              ? `按哈希 ${originHash.slice(0, 16)}… 定位`
+              : `隔离记录 #${origin.data.quarantine_id}`
+            : undefined
+        }
+        width="max-w-lg"
+        footer={
+          <Button size="sm" variant="ghost" onClick={closeOrigin}>
+            关闭
+          </Button>
+        }
+      >
+        {origin.isLoading ? (
+          <Loading label="正在反查…" className="py-6" />
+        ) : origin.error ? (
+          <ErrorBox message={(origin.error as Error).message} />
+        ) : origin.data ? (
+          <div className="space-y-3 text-[12px]">
+            <DetailRow
+              label="隔离文件"
+              value={
+                <span className="flex min-w-0 items-center gap-1">
+                  <span className="truncate">
+                    {origin.data.orig_path.split(/[\\/]/).pop() ?? origin.data.orig_path}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-6 shrink-0 px-1.5"
+                    title="预览这份隔离文件"
+                    icon={<Eye className="h-3.5 w-3.5" />}
+                    onClick={() => {
+                      const od = origin.data;
+                      if (!od) return;
+                      setPreview({
+                        quarantineId: od.quarantine_id,
+                        kind: od.media_kind,
+                        name: od.orig_path.split(/[\\/]/).pop() ?? od.orig_path,
+                      });
+                    }}
+                  />
+                </span>
+              }
+            />
+            <DetailRow label="定位方式" value={methodLabel(origin.data.method)} />
+            <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-[11.5px] text-muted-foreground">
+              {origin.data.note}
+            </div>
+
+            {origin.data.matches.length === 0 ? (
+              <EmptyState
+                icon={<ShieldCheck className="h-5 w-5" />}
+                title="没有找到主本"
+                desc="索引里已没有与它同内容、且仍在库里的文件。"
+                className="py-6"
+              />
+            ) : (
+              <div className="space-y-2">
+                {origin.data.matches.map((m) => (
+                  <OriginMatchCard key={m.file_id} m={m} onPreview={() => setPreview({ fileId: m.file_id, kind: m.media_kind, name: m.name })} />
+                ))}
+              </div>
+            )}
+          </div>
+        ) : null}
+      </Dialog>
+
+      <Dialog
+        open={preview != null}
+        onClose={() => setPreview(null)}
+        title={preview?.name ?? "预览"}
+        desc={
+          preview?.quarantineId != null
+            ? "隔离区里的这份文件"
+            : origin.data?.matches.find((m) => m.file_id === preview?.fileId)?.dir
+        }
+        width="max-w-2xl"
+        footer={
+          <Button size="sm" variant="ghost" onClick={() => setPreview(null)}>
+            关闭
+          </Button>
+        }
+      >
+        <div className="overflow-hidden rounded-lg border border-border bg-black/85">
+          <Preview
+            fileId={preview?.fileId}
+            quarantineId={preview?.quarantineId}
+            kind={preview?.kind ?? "other"}
+            className="max-h-[320px] w-full object-contain"
+          />
+        </div>
+      </Dialog>
+
       <ConfirmDialog
         open={!!restoreTarget}
         onClose={() => setRestoreTarget(null)}
@@ -328,6 +507,47 @@ export default function QuarantinePage() {
         confirmText="清理过期"
         desc="所有超过保留期的隔离文件将被永久删除。未过期的文件不受影响。"
       />
+    </div>
+  );
+}
+
+function methodLabel(method: string): string {
+  return (
+    {
+      group: "分组关系（隔离时判定保留的那份）",
+      hash: "全文哈希匹配（分组已重建）",
+      none: "未能定位",
+    } as Record<string, string>
+  )[method] ?? method;
+}
+
+function OriginMatchCard({ m, onPreview }: { m: QuarantineOriginMatch; onPreview: () => void }) {
+  const active = m.state === "active";
+  return (
+    <div className="flex items-center gap-3 rounded-md border border-border px-3 py-2">
+      <div className="h-12 w-16 shrink-0 overflow-hidden rounded bg-muted">
+        <Thumb fileId={m.file_id} kind={m.media_kind} width={160} className="h-full w-full" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          {m.is_keeper && <Badge tone="success">保留（主本）</Badge>}
+          {!active && <Badge tone="warn">{statusText[m.state] ?? m.state}</Badge>}
+          <span className="truncate text-[12px] font-medium" title={m.name}>
+            {m.name}
+          </span>
+        </div>
+        <div className="mt-0.5 truncate text-[10.5px] text-muted-foreground" title={m.path}>
+          {m.dir || m.path}
+        </div>
+        <div className="mt-0.5 text-[10.5px] text-muted-foreground">
+          {kindLabel(m.media_kind)} · {formatBytes(m.size)} · 修改于 {formatDate(m.mtime_ns / 1e6)}
+        </div>
+      </div>
+      {active && (
+        <Button size="sm" variant="ghost" icon={<Eye className="h-3.5 w-3.5" />} onClick={onPreview}>
+          预览
+        </Button>
+      )}
     </div>
   );
 }

@@ -161,8 +161,9 @@ func (s *Server) exportGroups(r *http.Request, kind string) ([]export.Row, strin
 	      LEFT JOIN dup_group_members km ON km.group_id=g.id AND km.is_keeper=1
 	      LEFT JOIN files k ON k.id=km.file_id`
 	args := []any{}
+	q += ` WHERE g.batch_active=1`
 	if kind != "" && kind != "all" {
-		q += ` WHERE g.kind=?`
+		q += ` AND g.kind=?`
 		args = append(args, kind)
 	}
 	q += ` ORDER BY g.reclaimable_bytes DESC, g.id, m.is_keeper DESC`

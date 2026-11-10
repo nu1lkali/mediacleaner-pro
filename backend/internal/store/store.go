@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -75,14 +76,69 @@ func dsn(path string, readonly bool) string {
 }
 
 func (s *Store) init() error {
+	// 顺序约束：schemaSQL 必须只引用「建表时就存在」的列。
+	// 旧库的表不会被 CREATE TABLE IF NOT EXISTS 重建，迁移列要到第 2 步才出现，
+	// 因此任何依赖迁移列的索引都必须放进 ensureIndexes()，不能写进 schemaSQL。
 	if _, err := s.rw.Exec(schemaSQL); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
+	}
+	if err := s.ensureColumns(); err != nil {
+		return err
+	}
+	if err := s.ensureIndexes(); err != nil {
+		return err
 	}
 	if _, err := s.rw.Exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, ?)`, NowMS()); err != nil {
 		return err
 	}
 	// 首次建表后落一次 WAL checkpoint，确保容器重启后 -wal 不无限增长
 	_, _ = s.rw.Exec(`PRAGMA wal_autocheckpoint=1000`)
+	return nil
+}
+
+// ensureColumns 给已存在的旧库补列。SQLite 的 ADD COLUMN 没有 IF NOT EXISTS，
+// 只能执行后忽略 "duplicate column name"，这样新库和老库都能走到同一个结构。
+func (s *Store) ensureColumns() error {
+	alters := []string{
+		// 分组证据等级：exact=已逐字节校验；sampled=仅采样一致，清理前再校验
+		`ALTER TABLE dup_groups ADD COLUMN evidence TEXT NOT NULL DEFAULT 'exact'`,
+		// 真实创建时间（btime）；旧行保持 0=未知，重新扫描后才会填充
+		`ALTER TABLE files ADD COLUMN btime_ns INTEGER NOT NULL DEFAULT 0`,
+		// 同组保留条件；旧库默认空串=未配置，行为与升级前完全一致
+		`ALTER TABLE dup_groups ADD COLUMN keeper_rule TEXT NOT NULL DEFAULT ''`,
+		// 批次隔离标记；旧库的现有分组全部视为「当前激活批次」，升级后界面照常显示
+		`ALTER TABLE dup_groups ADD COLUMN batch_active INTEGER NOT NULL DEFAULT 1`,
+		// 产出该批分组的扫描任务；更老的库没有这一列，补上才能让批次唯一索引成立。
+		// 0 = 升级前的遗留分组（未知任务）。ADD COLUMN 有默认值，旧数据自动填 0。
+		`ALTER TABLE dup_groups ADD COLUMN scan_task_id INTEGER NOT NULL DEFAULT 0`,
+		// 隔离区记录的哈希算法（sha256/blake3/none）；历史记录默认按 sha256 校验
+		`ALTER TABLE quarantine_items ADD COLUMN hash_algo TEXT NOT NULL DEFAULT 'sha256'`,
+	}
+	for _, q := range alters {
+		if _, err := s.rw.Exec(q); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("migrate: %w", err)
+		}
+	}
+	return nil
+}
+
+// ensureIndexes 处理索引定义变更，且在 ensureColumns() 之后运行。
+// SQLite 没有 CREATE OR REPLACE INDEX，旧库的 ux_groups_sig(kind, signature)
+// 会阻止「不同扫描任务产出相同签名」，必须移除后改建成带 scan_task_id 的批次唯一索引。
+// 批次相关的两个索引都只在这里创建：它们引用的列在旧库上是迁移补出来的，
+// 不能放进先执行的 schemaSQL。旧数据里每个 (kind,signature) 本来就唯一，
+// 加上默认值 scan_task_id=0 后仍唯一，因此建唯一索引不会与历史数据冲突。
+func (s *Store) ensureIndexes() error {
+	stmts := []string{
+		`DROP INDEX IF EXISTS ux_groups_sig`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS ux_groups_batch ON dup_groups(scan_task_id, kind, signature)`,
+		`CREATE INDEX IF NOT EXISTS ix_groups_batch ON dup_groups(batch_active, kind)`,
+	}
+	for _, q := range stmts {
+		if _, err := s.rw.Exec(q); err != nil {
+			return fmt.Errorf("migrate index: %w", err)
+		}
+	}
 	return nil
 }
 

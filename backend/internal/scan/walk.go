@@ -20,6 +20,7 @@ type Entry struct {
 	Size      int64
 	MtimeNS   int64
 	CtimeNS   int64
+	BtimeNS   int64
 	Dev       int64
 	Inode     int64
 	IsSymlink bool
@@ -183,7 +184,7 @@ func walkDir(ctx context.Context, rootID int64, root, dir string, depth int, opt
 			continue
 		}
 
-		ctime, dev, inode := fileTimes(info)
+		btime, ctime, dev, inode := fileTimes(info, full)
 		e := Entry{
 			RootID:    rootID,
 			Path:      full,
@@ -194,6 +195,7 @@ func walkDir(ctx context.Context, rootID int64, root, dir string, depth int, opt
 			Size:      size,
 			MtimeNS:   info.ModTime().UnixNano(),
 			CtimeNS:   ctime,
+			BtimeNS:   btime,
 			Dev:       dev,
 			Inode:     inode,
 			IsSymlink: isLink,

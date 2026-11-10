@@ -3,7 +3,11 @@ frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 bin/
+dist/
 *.exe
+
+# 本地 Go 工具链（.tools/go，仅本地静态检查用）
+.tools/
 
 # 运行时数据（源码与数据分离，数据目录在 /volume1/docker/mediacleaner-data）
 data/
@@ -26,3 +30,4 @@ syn-check.cjs
 Thumbs.db
 *.log
 __pycache__/
+tools/_runcheck.py

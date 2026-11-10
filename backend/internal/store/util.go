@@ -45,3 +45,28 @@ func (s *Store) SetSetting(ctx context.Context, key string, value any) error {
 		key, string(b), NowMS())
 	return err
 }
+
+// ActiveBatchKey 记录当前界面正在查看的扫描批次（scan_tasks.id）。
+// 即使某次扫描没有产出任何分组，也要能明确「现在看的是哪一批结果」。
+const ActiveBatchKey = "active_batch_task_id"
+
+// 分组证据等级，写入 dup_groups.evidence。放在 store 包是为了让
+// scan（生产）与 cleaner（消费）共用同一套取值，不必互相 import。
+const (
+	EvidenceExact   = "exact"   // 扫描时全文校验过，content_hash 相同
+	EvidenceSampled = "sampled" // 只比 size + 4 段采样，清理前需逐字节复验
+	EvidenceSimilar = "similar" // 感知哈希相似，本就允许内容不同
+	EvidenceTrusted = "trusted" // 用户确认信任采样结果，清理时也不比对
+)
+
+func (s *Store) ActiveBatch(ctx context.Context) int64 {
+	var n int64
+	if err := json.Unmarshal([]byte(s.Setting(ctx, ActiveBatchKey, "0")), &n); err != nil {
+		return 0
+	}
+	return n
+}
+
+func (s *Store) SetActiveBatch(ctx context.Context, taskID int64) error {
+	return s.SetSetting(ctx, ActiveBatchKey, taskID)
+}

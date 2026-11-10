@@ -51,7 +51,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	var exact, image, video dupStat
 	dupRows, err := s.st.Select(ctx, `
 		SELECT kind, COUNT(*), COALESCE(SUM(member_count-1),0), COALESCE(SUM(reclaimable_bytes),0)
-		FROM dup_groups WHERE member_count>1 GROUP BY kind`)
+		FROM dup_groups WHERE member_count>1 AND batch_active=1 GROUP BY kind`)
 	if err == nil {
 		for dupRows.Next() {
 			var (
@@ -281,10 +281,10 @@ func (s *Server) handleSuggestions(w http.ResponseWriter, r *http.Request) {
 	var f, b int64
 	_ = s.st.Get(ctx, []any{&f, &b}, `
 		SELECT COALESCE(SUM(member_count-1),0), COALESCE(SUM(reclaimable_bytes),0)
-		FROM dup_groups WHERE kind='exact' AND member_count>1`)
+		FROM dup_groups WHERE kind='exact' AND member_count>1 AND batch_active=1`)
 	out = append(out, suggestion{
 		Key: "exact", Title: "完全重复文件",
-		Detail: "内容逐字节相同，删除副本不影响任何数据。建议保留路径层级最浅的一份。",
+		Detail: "按文件大小与采样指纹归为同组；清理前会自动与保留副本逐字节复核。建议保留路径层级最浅的一份。",
 		Files:  f, Bytes: b, Severity: severityFor(b),
 	})
 
@@ -296,7 +296,7 @@ func (s *Server) handleSuggestions(w http.ResponseWriter, r *http.Request) {
 		var nf, nb int64
 		_ = s.st.Get(ctx, []any{&nf, &nb}, `
 			SELECT COALESCE(SUM(member_count-1),0), COALESCE(SUM(reclaimable_bytes),0)
-			FROM dup_groups WHERE kind=? AND member_count>1`, k.key)
+			FROM dup_groups WHERE kind=? AND member_count>1 AND batch_active=1`, k.key)
 		out = append(out, suggestion{Key: k.key, Title: k.title, Detail: k.detail,
 			Files: nf, Bytes: nb, Severity: severityFor(nb)})
 	}

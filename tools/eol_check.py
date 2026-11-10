@@ -1,7 +1,9 @@
 import sys
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\Administrator\WorkBuddy\2026-11-09-14-51-27\MediaCleaner")
+# 按脚本自身位置定位仓库根，别写死某台机器的绝对路径
+# （曾因写死 ROOT 导致换机器后直接 FileNotFoundError，检查形同虚设）
+ROOT = Path(__file__).resolve().parent.parent
 targets = ["deploy/synology-deploy.sh", "deploy/entrypoint.sh", "Dockerfile", ".dockerignore", "docker-compose.yml"]
 
 out = []

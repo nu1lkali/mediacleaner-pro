@@ -50,8 +50,19 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	var exact, image, video dupStat
 	dupRows, err := s.st.Select(ctx, `
-		SELECT kind, COUNT(*), COALESCE(SUM(member_count-1),0), COALESCE(SUM(reclaimable_bytes),0)
-		FROM dup_groups WHERE member_count>1 AND batch_active=1 GROUP BY kind`)
+		SELECT kind, COUNT(*) AS groups, COALESCE(SUM(rem),0), COALESCE(SUM(rb),0)
+		FROM (
+			SELECT g.id, g.kind,
+			       SUM(CASE WHEN m.is_keeper=0 AND f.state='active' THEN 1 ELSE 0 END) AS rem,
+			       SUM(CASE WHEN m.is_keeper=0 AND f.state='active' THEN f.size ELSE 0 END) AS rb
+			FROM dup_groups g
+			JOIN dup_group_members m ON m.group_id=g.id
+			JOIN files f ON f.id=m.file_id
+			WHERE g.member_count>1 AND g.batch_active=1
+			GROUP BY g.id, g.kind
+		) t
+		WHERE rem > 0
+		GROUP BY kind`)
 	if err == nil {
 		for dupRows.Next() {
 			var (
@@ -280,8 +291,17 @@ func (s *Server) handleSuggestions(w http.ResponseWriter, r *http.Request) {
 	// 1. 完全重复
 	var f, b int64
 	_ = s.st.Get(ctx, []any{&f, &b}, `
-		SELECT COALESCE(SUM(member_count-1),0), COALESCE(SUM(reclaimable_bytes),0)
-		FROM dup_groups WHERE kind='exact' AND member_count>1 AND batch_active=1`)
+		SELECT COALESCE(SUM(rem),0), COALESCE(SUM(rb),0)
+		FROM (
+			SELECT SUM(CASE WHEN m.is_keeper=0 AND f.state='active' THEN 1 ELSE 0 END) AS rem,
+			       SUM(CASE WHEN m.is_keeper=0 AND f.state='active' THEN f.size ELSE 0 END) AS rb
+			FROM dup_groups g
+			JOIN dup_group_members m ON m.group_id=g.id
+			JOIN files f ON f.id=m.file_id
+			WHERE g.kind='exact' AND g.member_count>1 AND g.batch_active=1
+			GROUP BY g.id
+		) t
+		WHERE rem > 0`)
 	out = append(out, suggestion{
 		Key: "exact", Title: "完全重复文件",
 		Detail: "按文件大小与采样指纹归为同组；清理前会自动与保留副本逐字节复核。建议保留路径层级最浅的一份。",
@@ -295,8 +315,17 @@ func (s *Server) handleSuggestions(w http.ResponseWriter, r *http.Request) {
 	} {
 		var nf, nb int64
 		_ = s.st.Get(ctx, []any{&nf, &nb}, `
-			SELECT COALESCE(SUM(member_count-1),0), COALESCE(SUM(reclaimable_bytes),0)
-			FROM dup_groups WHERE kind=? AND member_count>1 AND batch_active=1`, k.key)
+			SELECT COALESCE(SUM(rem),0), COALESCE(SUM(rb),0)
+			FROM (
+				SELECT SUM(CASE WHEN m.is_keeper=0 AND f.state='active' THEN 1 ELSE 0 END) AS rem,
+				       SUM(CASE WHEN m.is_keeper=0 AND f.state='active' THEN f.size ELSE 0 END) AS rb
+				FROM dup_groups g
+				JOIN dup_group_members m ON m.group_id=g.id
+				JOIN files f ON f.id=m.file_id
+				WHERE g.kind=? AND g.member_count>1 AND g.batch_active=1
+				GROUP BY g.id
+			) t
+			WHERE rem > 0`, k.key)
 		out = append(out, suggestion{Key: k.key, Title: k.title, Detail: k.detail,
 			Files: nf, Bytes: nb, Severity: severityFor(nb)})
 	}

@@ -832,7 +832,7 @@ function GroupCard({
   onReapplyRule: (groupId: number) => void;
   ruleBusy: boolean;
 }) {
-  const [expanded, setExpanded] = useState(group.member_count <= 4);
+  const [expanded, setExpanded] = useState(group.members.length <= 4);
   const shown = expanded ? group.members : group.members.slice(0, 3);
   const keeper = group.members.find((m) => m.is_keeper);
 
@@ -864,7 +864,7 @@ function GroupCard({
                 相似度 {(group.avg_similarity * 100).toFixed(1)}%
               </Badge>
             )}
-            <Badge tone="info" className="whitespace-nowrap">{group.member_count} 个文件</Badge>
+            <Badge tone="info" className="whitespace-nowrap">{group.members.length} 个文件</Badge>
             <Badge tone="warn" className="whitespace-nowrap">可释放 {formatBytes(group.reclaimable_bytes)}</Badge>
           </div>
         }
@@ -879,7 +879,7 @@ function GroupCard({
                   : `单文件 ${formatBytes(group.size)} · ${groupKindLabel(group.kind)}`
               }
             >
-              {group.signature || `${group.member_count} 个副本`}
+              {group.signature || `${group.members.length} 个副本`}
             </CardTitle>
           </div>
         </div>

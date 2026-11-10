@@ -75,8 +75,13 @@ func (s *Server) handleListGroups(w http.ResponseWriter, r *http.Request) {
 		sortBy = "reclaim"
 	}
 
-	// 只看当前激活批次的分组；历史批次由 /api/groups/batch 切换后再查
-	where := []string{"g.kind=?", "g.member_count>1", "g.batch_active=1"}
+	// 只看当前激活批次的分组；历史批次由 /api/groups/batch 切换后再查。
+	// 关键：只列「仍有可清理副本」的组——已清理（隔离/删除/丢失）的组不该再占着待处理清单。
+	// 否则文件进了隔离区，重复组却还在，用户会以为没清理干净。
+	where := []string{"g.kind=?", "g.member_count>1", "g.batch_active=1",
+		`g.id IN (SELECT m.group_id FROM dup_group_members m
+			JOIN files f ON f.id=m.file_id
+			WHERE m.is_keeper=0 AND f.state='active')`}
 	args := []any{kind}
 	if minReclaim > 0 {
 		where = append(where, "g.reclaimable_bytes>=?")
@@ -179,9 +184,14 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGroupSummary(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.st.Select(r.Context(), `
-		SELECT kind, COUNT(*) AS groups, COALESCE(SUM(member_count - 1),0) AS removable,
+		SELECT g.kind, COUNT(*) AS groups,
+		       COALESCE(SUM(
+		         (SELECT COUNT(*) FROM dup_group_members m
+		          JOIN files f ON f.id=m.file_id
+		          WHERE m.group_id=g.id AND m.is_keeper=0 AND f.state='active')
+		       ),0) AS removable,
 		       COALESCE(SUM(reclaimable_bytes),0) AS bytes
-		FROM dup_groups WHERE member_count>1 AND batch_active=1 GROUP BY kind`)
+		FROM dup_groups g WHERE g.member_count>1 AND g.batch_active=1 GROUP BY g.kind`)
 	if err != nil {
 		fail(w, err)
 		return
@@ -238,6 +248,7 @@ func (s *Server) fillMembers(r *http.Request, index map[int64]*Group, limit int)
 		LEFT JOIN roots rt ON rt.id=f.root_id
 		LEFT JOIN file_media md ON md.file_id=f.id
 		WHERE m.group_id IN (`+strings.Join(ph, ",")+`)
+		  AND (m.is_keeper = 1 OR f.state = 'active')
 		ORDER BY m.group_id, m.is_keeper DESC, f.size DESC, f.path`, ids...)
 	if err != nil {
 		return err

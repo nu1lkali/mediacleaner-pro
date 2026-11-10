@@ -12,6 +12,7 @@ export function Dialog({
   children,
   footer,
   width = "max-w-lg",
+  closeOnBackdrop = true,
 }: {
   open: boolean;
   onClose: () => void;
@@ -20,6 +21,8 @@ export function Dialog({
   children?: ReactNode;
   footer?: ReactNode;
   width?: string;
+  /** 点击遮罩（卡片外空白区）是否关闭，默认开启；卡片内部点击不会触发。 */
+  closeOnBackdrop?: boolean;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -37,7 +40,12 @@ export function Dialog({
 
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 backdrop-blur-[1px] sm:items-start sm:overflow-y-auto sm:px-4 sm:py-10">
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 backdrop-blur-[1px] sm:items-start sm:overflow-y-auto sm:px-4 sm:py-10"
+      onClick={(e) => {
+        if (closeOnBackdrop && e.target === e.currentTarget) onClose();
+      }}
+    >
       <div
         className={cn(
           "w-full animate-fade-in rounded-t-2xl border border-border bg-card shadow-lift sm:rounded-xl",

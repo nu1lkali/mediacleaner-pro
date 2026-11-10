@@ -372,9 +372,10 @@ func (s *Server) handleListQuarantine(w http.ResponseWriter, r *http.Request) {
 	if status == "" {
 		status = "quarantined"
 	}
+	kind := r.URL.Query().Get("kind")
 	limit := queryInt(r, "limit", 50)
 	offset := queryInt(r, "offset", 0)
-	items, total, err := s.quar.List(r.Context(), status, limit, offset)
+	items, total, err := s.quar.List(r.Context(), status, kind, limit, offset)
 	if err != nil {
 		fail(w, err)
 		return

@@ -324,7 +324,9 @@ func (q *Quarantine) storedPath(dir, sum, ext string) string {
 }
 
 // List 分页列出隔离区记录。
-func (q *Quarantine) List(ctx context.Context, status string, limit, offset int) ([]QuarantineItem, int, error) {
+//
+// kind 可选：video/image/audio/document/other，传空或 "all" 表示不按类型过滤。
+func (q *Quarantine) List(ctx context.Context, status, kind string, limit, offset int) ([]QuarantineItem, int, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
@@ -333,6 +335,10 @@ func (q *Quarantine) List(ctx context.Context, status string, limit, offset int)
 	if status != "" && status != "all" {
 		where = "status=?"
 		args = append(args, status)
+	}
+	if kind != "" && kind != "all" {
+		where += " AND media_kind=?"
+		args = append(args, kind)
 	}
 	var total int
 	if err := q.st.Get(ctx, &total, `SELECT COUNT(*) FROM quarantine_items WHERE `+where, args...); err != nil {

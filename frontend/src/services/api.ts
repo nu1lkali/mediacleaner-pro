@@ -251,14 +251,14 @@ export const api = {
     request<{ ok: boolean }>(`/clean/items/${itemId}`, { method: "PATCH", ...json({ selected }) }),
 
   /* ---------- 隔离区 ---------- */
-  quarantine: (status = "quarantined", limit = 50, offset = 0) =>
+  quarantine: (status = "quarantined", kind = "all", limit = 50, offset = 0) =>
     request<{
       items: QuarantineItem[];
       total: number;
       quarantined_count: number;
       quarantined_bytes: number;
       retention_days: number;
-    }>(`/quarantine${qs({ status, limit, offset })}`),
+    }>(`/quarantine${qs({ status, kind, limit, offset })}`),
   quarantineItem: (id: number) => request<QuarantineItem>(`/quarantine/${id}`),
   /** 反查隔离文件的主本（不需要重新扫描） */
   quarantineOrigin: (id: number) => request<QuarantineOrigin>(`/quarantine/${id}/origin`),

@@ -25,6 +25,7 @@ import { cn, formatBytes, formatDate, formatNumber, kindLabel, statusText, statu
 export default function QuarantinePage() {
   const qc = useQueryClient();
   const [status, setStatus] = useState("quarantined");
+  const [kind, setKind] = useState("all");
   const [keyword, setKeyword] = useState("");
   const [restoreTarget, setRestoreTarget] = useState<QuarantineItem | null>(null);
   const [purgeTarget, setPurgeTarget] = useState<QuarantineItem | null>(null);
@@ -39,8 +40,8 @@ export default function QuarantinePage() {
   >(null);
 
   const q = useQuery({
-    queryKey: ["quarantine", status],
-    queryFn: () => api.quarantine(status, 100, 0),
+    queryKey: ["quarantine", status, kind],
+    queryFn: () => api.quarantine(status, kind, 100, 0),
     refetchInterval: 20000,
   });
 
@@ -142,6 +143,14 @@ export default function QuarantinePage() {
               <option value="restored">已恢复</option>
               <option value="purged">已永久删除</option>
               <option value="all">全部</option>
+            </Select>
+            <Select value={kind} onChange={(e) => setKind(e.target.value)} className="h-8 flex-1 text-[12px] sm:w-[110px] sm:flex-none">
+              <option value="all">全部类型</option>
+              <option value="video">视频</option>
+              <option value="image">图片</option>
+              <option value="audio">音频</option>
+              <option value="document">文档</option>
+              <option value="other">其他</option>
             </Select>
             <Button
               size="sm"
